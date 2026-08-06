@@ -1,0 +1,16 @@
+services:
+  livekit-tls-proxy:
+    image: caddy:2
+    container_name: livekit-tls-proxy
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/etc/caddy/certs:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+
+volumes:
+  caddy_data:
+  caddy_config:
