@@ -1,0 +1,16 @@
+{
+    # Another service already owns port 80.
+    auto_https disable_redirects
+}
+
+https://10.160.152.38:51027 {
+    tls /etc/caddy/certs/text-test-cert.pem /etc/caddy/certs/text-test-key.pem
+
+    # LiveKit's signaling WebSocket and validation endpoint.
+    @livekit path /rtc /rtc/*
+    reverse_proxy @livekit 127.0.0.1:7880
+
+    # The UI/token server stays private and is exposed through this same TLS
+    # origin, avoiding a second browser-visible port and CORS/TLS split.
+    reverse_proxy 127.0.0.1:51028
+}

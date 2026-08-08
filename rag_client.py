@@ -127,8 +127,9 @@ async def stream_answer(
     if client is not None:
         return await _stream_with_client(client, question, on_event, settings)
 
-    # Deliberately no read timeout: long research gaps are kept alive by SSE
-    # comments, and a normal httpx read timeout would kill valid runs.
+    # Per-stage timeout and retry handling belongs to the coordinator, which
+    # knows whether a plan or a level is expected. Keep this transport stream
+    # open for valid long-running research.
     import httpx
 
     timeout = httpx.Timeout(None, connect=5.0)
