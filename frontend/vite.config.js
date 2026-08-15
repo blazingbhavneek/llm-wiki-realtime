@@ -1,10 +1,14 @@
+import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import tailwindcss from '@tailwindcss/vite'
 
+// VITE_HTTPS_KEY/VITE_HTTPS_CERT are filesystem paths (written by
+// scripts/setup_https_livekit.sh into .env.development.local), not inline
+// PEM content.
 const https = process.env.VITE_HTTPS_KEY && process.env.VITE_HTTPS_CERT
   ? {
-      key: process.env.VITE_HTTPS_KEY,
-      cert: process.env.VITE_HTTPS_CERT,
+      key: readFileSync(process.env.VITE_HTTPS_KEY),
+      cert: readFileSync(process.env.VITE_HTTPS_CERT),
     }
   : undefined
 

@@ -3,7 +3,7 @@
     auto_https disable_redirects
 }
 
-https://10.160.152.38:51027 {
+https://10.136.215.175:51027 {
     tls /etc/caddy/certs/text-test-cert.pem /etc/caddy/certs/text-test-key.pem
 
     # LiveKit's signaling WebSocket and validation endpoint.

@@ -3,9 +3,13 @@ import { useEffect, useRef } from 'react'
 export default function Transcript({ messages, thinking }) {
   const endRef = useRef(null)
 
+  // The live interim grows in place rather than appending, so the count alone
+  // would hold the view still for the whole utterance. Track the tail text too.
+  const tail = messages[messages.length - 1]?.text ?? ''
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [messages.length])
+  }, [messages.length, tail])
 
   if (messages.length === 0) {
     return (

@@ -1,130 +1,103 @@
-"""Conversation-window attention state and keyword-spot fallback."""
+"""Listening or dormant. The orb toggle, and spoken commands.
+
+Attention gates input, never output. A dormant assistant still reports what it
+found; it simply stops treating what it hears as a turn.
+
+The gate is the orb: press it to listen, press it again to stop. There is no
+wake word, and nothing else opens or closes attention on the user's behalf -
+no idle timeout, no reply window - because an explicit toggle means the user
+said when to start and will say when to stop. Typed text is always a turn; you
+do not have to be listening to read.
+"""
 
 from __future__ import annotations
 
 import re
 import time
 from dataclasses import dataclass
-from enum import Enum
+
+DORMANT = "dormant"
+OPEN = "open"
+
+# Commands are plain regex and are checked before the LLM ever sees the text.
+# A stop that depends on a healthy LLM is not a stop.
+_STOP = re.compile(r"(やめて|止めて|停止|ストップ|キャンセル|もういい|やっぱりいい)")
+_REPEAT = re.compile(r"(もう一回|もう一度|繰り返|さっきの.*(?:何|言って))")
+_CONTINUE = re.compile(r"(続き|続けて|その先)")
+_CLOSE = re.compile(r"^(ありがとう|ありがと|どうも|終了|さようなら|おわり|終わり)")
 
 
-class AttentionState(str, Enum):
-    DORMANT = "dormant"
-    OPEN = "open"
-
-
-@dataclass(frozen=True, slots=True)
-class AttentionDecision:
+@dataclass(frozen=True)
+class Turn:
     accepted: bool
-    addressed: bool
     text: str
-    action: str = "turn"
-    wake_detected: bool = False
+    command: str  # "none" | "stop" | "repeat" | "continue" | "close"
 
 
-class AttentionFSM:
-    def __init__(self, *, idle_seconds: float = 20.0, wake_words: tuple[str, ...] | None = None):
-        self.idle_seconds = idle_seconds
-        self.wake_words = wake_words or ("モーヴィ", "モービー", "モーヴィー", "movi", "moovy")
-        self.state = AttentionState.DORMANT
-        self.last_exchange_at = 0.0
-        self.reply_window_until = 0.0
-        self.research_in_flight = 0
+class Attention:
+    def __init__(self) -> None:
+        self.state = DORMANT
+        self.because = ""
+        self.button_held = False
+        self.last_activity_at = 0.0
 
-    def _now(self, now: float | None) -> float:
-        return time.monotonic() if now is None else now
+    # -- commands from the Conductor ---------------------------------------
 
-    def _wake_pattern(self) -> re.Pattern[str]:
-        alternatives = "|".join(re.escape(word) for word in self.wake_words)
-        return re.compile(alternatives, flags=re.IGNORECASE)
-
-    def _strip_wake_word(self, text: str) -> tuple[str, bool]:
-        pattern = self._wake_pattern()
-        found = bool(pattern.search(text))
-        cleaned = pattern.sub("", text)
-        cleaned = re.sub(r"^[\s、,。.!！?？:：]+|[\s]+$", "", cleaned)
-        return cleaned, found
-
-    def _expire_if_idle(self, now: float) -> None:
-        if (
-            self.state == AttentionState.OPEN
-            and not self.research_in_flight
-            and now - self.last_exchange_at >= self.idle_seconds
-        ):
-            self.state = AttentionState.DORMANT
-
-    def research_started(self) -> None:
-        self.research_in_flight += 1
-
-    def research_finished(self) -> None:
-        self.research_in_flight = max(0, self.research_in_flight - 1)
-
-    def agent_asked(self, *, now: float | None = None) -> None:
-        current = self._now(now)
-        self.reply_window_until = current + 3.0
-        self.last_exchange_at = current
+    def open(self, because: str, *, now: float | None = None) -> None:
+        self.state = OPEN
+        self.because = because
+        self.last_activity_at = self._now(now)
 
     def close(self) -> None:
-        self.state = AttentionState.DORMANT
-        self.reply_window_until = 0.0
+        self.state = DORMANT
+        self.because = ""
 
-    def evaluate(
+    def set_button_held(self, held: bool) -> None:
+        """Records the toggle only. Whether it also opens or closes is a
+        decision, and decisions live in the Conductor."""
+        self.button_held = held
+
+    # -- the whole gate, one call ------------------------------------------
+
+    def accept(
         self,
         text: str,
         *,
+        from_text_input: bool = False,
         now: float | None = None,
-        text_input: bool = False,
-        only_speaker: bool = True,
-    ) -> AttentionDecision:
-        current = self._now(now)
-        self._expire_if_idle(current)
-        cleaned, wake_detected = self._strip_wake_word(text.strip())
+    ) -> Turn:
+        cleaned = (text or "").strip()
 
-        if self._is_close_command(cleaned):
-            accepted = text_input or wake_detected or self.state == AttentionState.OPEN
-            if accepted:
-                self.close()
-            return AttentionDecision(accepted, accepted, cleaned, "close", wake_detected)
-
-        reply_window = current <= self.reply_window_until
-        imperative = self._is_interrupt_command(cleaned)
-        addressed = text_input or wake_detected or imperative or reply_window or (
-            self.state == AttentionState.OPEN and only_speaker
-        )
-
-        if self.state == AttentionState.DORMANT and not (text_input or wake_detected):
-            return AttentionDecision(False, False, cleaned, "ignore", wake_detected)
+        # Speech counts only while the orb is on. `state` is checked too so a
+        # turn already in flight is not dropped by the release that lands
+        # between the transcript and this call.
+        addressed = from_text_input or self.button_held or self.state == OPEN
         if not addressed:
-            return AttentionDecision(False, False, cleaned, "ignore", wake_detected)
+            return Turn(False, cleaned, "none")
 
-        self.state = AttentionState.OPEN
-        self.last_exchange_at = current
-        if not cleaned:
-            return AttentionDecision(True, True, "", "wake", wake_detected)
-        if self._is_cancel_command(cleaned):
-            return AttentionDecision(True, True, cleaned, "cancel", wake_detected)
-        if self._is_continue_command(cleaned):
-            return AttentionDecision(True, True, cleaned, "continue", wake_detected)
-        if self._is_repeat_command(cleaned):
-            return AttentionDecision(True, True, cleaned, "repeat", wake_detected)
-        return AttentionDecision(True, True, cleaned, "turn", wake_detected)
+        self.state = OPEN
+        self.because = "text" if from_text_input else "speech"
+        self.last_activity_at = self._now(now)
+
+        command = self.classify(cleaned)
+        if command == "close":
+            self.close()
+        return Turn(True, cleaned, command)
 
     @staticmethod
-    def _is_interrupt_command(text: str) -> bool:
-        return bool(re.match(r"^(待って|ちょっと|違う|やめて|ストップ|止めて)", text))
+    def classify(text: str) -> str:
+        if not text:
+            return "none"
+        if _CLOSE.match(text):
+            return "close"
+        if _STOP.search(text):
+            return "stop"
+        if _CONTINUE.search(text):
+            return "continue"
+        if _REPEAT.search(text):
+            return "repeat"
+        return "none"
 
     @staticmethod
-    def _is_cancel_command(text: str) -> bool:
-        return bool(re.search(r"(やっぱりいい|調査を?やめ|検索を?やめ|キャンセル|もういい)", text))
-
-    @staticmethod
-    def _is_continue_command(text: str) -> bool:
-        return bool(re.fullmatch(r"(?:続き|続きを|続けて|その先)(?:お願い|ください)?[。.!！]?", text))
-
-    @staticmethod
-    def _is_repeat_command(text: str) -> bool:
-        return bool(re.search(r"(もう一回|もう一度|さっきの.*(?:何|言って)|繰り返)", text))
-
-    @staticmethod
-    def _is_close_command(text: str) -> bool:
-        return bool(re.fullmatch(r"(?:ありがとう|ありがと|もういいよ|終了|さようなら)[。.!！]?", text))
+    def _now(now: float | None) -> float:
+        return time.monotonic() if now is None else now

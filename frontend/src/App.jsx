@@ -45,6 +45,8 @@ export default function App() {
   const roomRef = useRef(null)
   const devMediaStream = useRef(null)
   const demoStops = useRef(new Set())
+  const listenHeld = useRef(false)
+  const micOnRef = useRef(false)
 
   const thinking = isRunning(research)
 
@@ -69,6 +71,23 @@ export default function App() {
     }
     volumeFrame.current = requestAnimationFrame(step)
   }, [])
+
+  // The orb is the whole gate: while it is on, anything said is a turn, and
+  // while it is off the agent ignores speech entirely. There is no wake word.
+  const publishListen = useCallback(held => {
+    if (listenHeld.current === held) return
+    listenHeld.current = held
+    const room = roomRef.current
+    if (!room) return
+    const payload = new TextEncoder().encode(JSON.stringify({ type: 'listen', held }))
+    room.localParticipant.publishData(payload, { reliable: true, topic: 'attention' }).catch(() => {})
+  }, [])
+
+  // Pressing the orb on means "listening" until it is pressed again.
+  const setMicListening = useCallback(on => {
+    micOnRef.current = on
+    publishListen(on)
+  }, [publishListen])
 
   // --- orb mode -----------------------------------------------------------
   // Polled rather than pushed: audio levels change every frame, but the orb
@@ -131,6 +150,8 @@ export default function App() {
       next.on(RoomEvent.Disconnected, () => {
         setConnected(false)
         setListening(false)
+        micOnRef.current = false
+        listenHeld.current = false
         roomRef.current = null
         agentAudioElements.current.clear()
         bus.detach('agent')
@@ -162,6 +183,7 @@ export default function App() {
       next.on(RoomEvent.LocalTrackPublished, publication => {
         if (publication.kind !== Track.Kind.Audio) return
         setListening(true)
+        setMicListening(true)
         if (publication.track?.mediaStreamTrack) {
           bus.attach('mic', publication.track.mediaStreamTrack)
         }
@@ -169,11 +191,12 @@ export default function App() {
 
       next.on(RoomEvent.LocalTrackUnpublished, () => {
         setListening(false)
+        setMicListening(false)
         bus.detach('mic')
       })
 
       // The agent mirrors every realtime RAG SSE event onto this topic
-      // unchanged, so the panel and the speech scheduler see the same stream.
+      // unchanged, so the panel and the voice see the same stream.
       next.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
         if (!participant?.identity?.startsWith('agent-')) return
         if (topic !== 'research' && topic !== 'attention') return
@@ -188,11 +211,43 @@ export default function App() {
         }
       })
 
+      // A streaming STT publishes every interim as its own text stream, all
+      // carrying the same lk.segment_id, and then the final as one more.
+      // Appending each one turns a single sentence into a ladder of
+      // half-finished bubbles, so upsert on the segment id and let the text
+      // grow in place instead.
+      const applied = new Map()
+      let streamSeq = 0
       next.registerTextStreamHandler?.('lk.transcription', async (reader, participant) => {
+        // Read before the first await: streams open in order but readAll()
+        // can resolve out of order, and a stale interim must not clobber a
+        // newer one.
+        const seq = streamSeq++
+        const attributes = reader.info?.attributes || {}
+        const segmentId = attributes['lk.segment_id']
+        const final = attributes['lk.transcription_final'] === 'true'
+
         const value = await reader.readAll()
         if (!value?.trim()) return
         const role = participant?.identity?.startsWith('agent-') ? 'agent' : 'user'
-        setMessages(current => [...current, { role, text: value }])
+
+        if (!segmentId) {
+          setMessages(current => [...current, { role, text: value }])
+          return
+        }
+        if ((applied.get(segmentId) ?? -1) > seq) return
+        if (final) applied.delete(segmentId)
+        else applied.set(segmentId, seq)
+
+        setMessages(current => {
+          const i = current.findIndex(message => message.segmentId === segmentId)
+          if (i === -1) return [...current, { role, text: value, segmentId, final }]
+          // The segment is settled; ignore an interim that lost the race to it.
+          if (current[i].final && !final) return current
+          const updated = [...current]
+          updated[i] = { role, text: value, segmentId, final }
+          return updated
+        })
       })
 
       await next.connect(credentials.url, credentials.token)
@@ -205,7 +260,7 @@ export default function App() {
     } finally {
       connecting.current = false
     }
-  }, [bus, scheduleReconnect, setAgentDucked])
+  }, [bus, scheduleReconnect, setAgentDucked, setMicListening])
 
   useEffect(() => { connectRef.current = connect })
 
@@ -355,8 +410,8 @@ export default function App() {
               {thinking
                 ? `段階 ${levelsDone + 1} / ${research.levels.length || '?'} を調査中`
                 : listening
-                  ? DEV_MODE ? '1秒後に音声を返しています' : '「モーヴィ」と呼んでください'
-                  : DEV_MODE ? '円を押すと1秒遅延の音声テスト' : '円を押して話す'}
+                  ? DEV_MODE ? '1秒後に音声を返しています' : '聞いています。もう一度押すと停止します'
+                  : DEV_MODE ? '円を押すと1秒遅延の音声テスト' : '円を押して話しかける'}
             </p>
           </div>
         </div>
