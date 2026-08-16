@@ -22,6 +22,10 @@ const ORB_LABEL = {
 
 export default function App() {
   const [connected, setConnected] = useState(DEV_MODE)
+  // Tracked separately from `connected`: the room stays up perfectly well
+  // after the agent's session dies, and only this says whether anyone is
+  // actually on the other end.
+  const [agentPresent, setAgentPresent] = useState(DEV_MODE)
   const [listening, setListening] = useState(false)
   const [draft, setDraft] = useState('')
   const [messages, setMessages] = useState(DEV_MODE ? DEMO_TRANSCRIPT : [])
@@ -47,6 +51,8 @@ export default function App() {
   const demoStops = useRef(new Set())
   const listenHeld = useRef(false)
   const micOnRef = useRef(false)
+  const agentRetries = useRef(0)
+  const agentTimer = useRef(null)
 
   const thinking = isRunning(research)
 
@@ -74,14 +80,21 @@ export default function App() {
 
   // The orb is the whole gate: while it is on, anything said is a turn, and
   // while it is off the agent ignores speech entirely. There is no wake word.
-  const publishListen = useCallback(held => {
-    if (listenHeld.current === held) return
+  const publishListen = useCallback((held, { force = false } = {}) => {
+    if (!force && listenHeld.current === held) return
     listenHeld.current = held
     const room = roomRef.current
     if (!room) return
     const payload = new TextEncoder().encode(JSON.stringify({ type: 'listen', held }))
     room.localParticipant.publishData(payload, { reliable: true, topic: 'attention' }).catch(() => {})
   }, [])
+
+  // Data packets are not replayed for participants who join later, so an orb
+  // pressed before the agent connects would never reach it and it would sit
+  // dormant while the user talked. Re-send the current state on arrival.
+  const republishListen = useCallback(() => {
+    publishListen(listenHeld.current, { force: true })
+  }, [publishListen])
 
   // Pressing the orb on means "listening" until it is pressed again.
   const setMicListening = useCallback(on => {
@@ -130,6 +143,34 @@ export default function App() {
     }, delay)
   }, [])
 
+  // The agent left, or told us its session died. The room is still healthy, so
+  // nothing else here notices - the orb keeps its red "listening" look over an
+  // agent that cannot hear a word. Put the microphone down, say so, and go
+  // back through /token, which mints a new room and a new dispatch: that is
+  // the only route to a working agent.
+  const handleAgentGone = useCallback(detail => {
+    setAgentPresent(false)
+    roomRef.current?.localParticipant.setMicrophoneEnabled(false).catch(() => {})
+    setListening(false)
+    micOnRef.current = false
+    listenHeld.current = false
+    bus.detach('mic')
+
+    if (agentTimer.current) return
+    // Its own backoff, not the room's: the room reconnects fine every time,
+    // so the room's counter resets and would retry a dying agent every second.
+    const delay = Math.min(2000 * 2 ** agentRetries.current, 20000)
+    agentRetries.current += 1
+    setError(
+      `エージェントが停止しました${detail ? `（${detail}）` : ''}。`
+      + `${Math.round(delay / 1000)}秒後に再接続します。`
+    )
+    agentTimer.current = setTimeout(() => {
+      agentTimer.current = null
+      roomRef.current?.disconnect()
+    }, delay)
+  }, [bus])
+
   const connect = useCallback(async () => {
     if (DEV_MODE || roomRef.current || connecting.current) return roomRef.current
     connecting.current = true
@@ -147,8 +188,21 @@ export default function App() {
         setConnected(true)
       })
 
+      next.on(RoomEvent.ParticipantConnected, participant => {
+        if (!participant.identity?.startsWith('agent-')) return
+        agentRetries.current = 0
+        setAgentPresent(true)
+        setError('')
+        republishListen()
+      })
+
+      next.on(RoomEvent.ParticipantDisconnected, participant => {
+        if (participant.identity?.startsWith('agent-')) handleAgentGone('')
+      })
+
       next.on(RoomEvent.Disconnected, () => {
         setConnected(false)
+        setAgentPresent(false)
         setListening(false)
         micOnRef.current = false
         listenHeld.current = false
@@ -205,6 +259,11 @@ export default function App() {
           if (topic === 'research') dispatch(event)
           else if (topic === 'attention' && event.type === 'duck') {
             setAgentDucked(Boolean(event.ducked))
+          } else if (topic === 'attention' && event.type === 'agent_status') {
+            // The agent's own diagnosis, which beats waiting for the
+            // participant to time out - and it names the component that broke.
+            if (event.state === 'closed') handleAgentGone(event.detail || '')
+            else setError(`エージェントの${event.detail || '一部'}に問題があります。`)
           }
         } catch (e) {
           setError(`エージェントイベントを読めませんでした: ${e.message || e}`)
@@ -252,6 +311,14 @@ export default function App() {
 
       await next.connect(credentials.url, credentials.token)
       roomRef.current = next
+      // ParticipantConnected only fires for arrivals after this point, and the
+      // dispatch can beat us into the room.
+      for (const participant of next.remoteParticipants.values()) {
+        if (participant.identity?.startsWith('agent-')) {
+          agentRetries.current = 0
+          setAgentPresent(true)
+        }
+      }
       return next
     } catch (e) {
       setError(`接続を再試行しています: ${e.message || e}`)
@@ -260,7 +327,7 @@ export default function App() {
     } finally {
       connecting.current = false
     }
-  }, [bus, scheduleReconnect, setAgentDucked, setMicListening])
+  }, [bus, scheduleReconnect, setAgentDucked, setMicListening, republishListen, handleAgentGone])
 
   useEffect(() => { connectRef.current = connect })
 
@@ -272,6 +339,7 @@ export default function App() {
     const currentBus = bus
     return () => {
       clearTimeout(retryTimer.current)
+      clearTimeout(agentTimer.current)
       if (volumeFrame.current) cancelAnimationFrame(volumeFrame.current)
       roomRef.current?.disconnect()
       if (devMediaStream.current) {
@@ -325,12 +393,26 @@ export default function App() {
     }
     const active = roomRef.current || await connect()
     if (!active) return
+    if (!agentPresent && !listening) {
+      // Turning the orb red with nobody on the other end is precisely the
+      // failure this is here to stop: it looks like it is listening, forever.
+      setError('エージェントに接続していません。再接続を待っています。')
+      return
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
       setError('マイクを使うには HTTPS または localhost で開いてください。')
       return
     }
     try {
-      await active.localParticipant.setMicrophoneEnabled(!listening)
+      const next = !listening
+      await active.localParticipant.setMicrophoneEnabled(next)
+      // Disabling mutes the publication instead of unpublishing it, so
+      // LocalTrackUnpublished never fires on the way down - the orb would
+      // stay red and the agent would keep listening. Drive both from the
+      // intent; LocalTrackPublished still handles the bus on the way up.
+      setListening(next)
+      setMicListening(next)
+      if (!next) bus.detach('mic')
     } catch (e) {
       setError(`マイクを有効にできませんでした: ${e.message || e}`)
     }
@@ -354,7 +436,7 @@ export default function App() {
       demoStops.current.add(stop)
       return
     }
-    if (!roomRef.current || !connected) return
+    if (!roomRef.current || !connected || !agentPresent) return
     try {
       await roomRef.current.localParticipant.sendText(question, { topic: 'lk.chat' })
     } catch (e) {
@@ -363,6 +445,8 @@ export default function App() {
   }
 
   const levelsDone = research.levels.filter(level => level.result).length
+  // Connected to the room is not the same as having someone to talk to.
+  const ready = connected && agentPresent
 
   return (
     <main data-sidebar-open={sidebarOpen} className="workspace-layout h-dvh w-full overflow-hidden bg-canvas text-ink">
@@ -371,10 +455,12 @@ export default function App() {
           <div className="flex items-center gap-1.5">
             <span
               className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium ${
-                connected ? 'bg-ok/10 text-ok' : 'bg-line-soft text-muted'
+                ready ? 'bg-ok/10 text-ok' : connected ? 'bg-warn/10 text-warn' : 'bg-line-soft text-muted'
               }`}
             >
-              <i className={`block h-1.5 w-1.5 rounded-full ${connected ? 'bg-ok' : 'bg-faint'}`} /> {DEV_MODE ? '開発モード' : connected ? '接続済み' : '未接続'}
+              <i className={`block h-1.5 w-1.5 rounded-full ${
+                ready ? 'bg-ok' : connected ? 'bg-warn' : 'bg-faint'
+              }`} /> {DEV_MODE ? '開発モード' : ready ? '接続済み' : connected ? 'エージェント待機中' : '未接続'}
             </span>
             <button
               type="button"
@@ -427,8 +513,8 @@ export default function App() {
             value={draft}
             onChange={setDraft}
             onSend={send}
-            connected={connected}
-            disabled={!connected}
+            connected={ready}
+            disabled={!ready}
           />
         </div>
       </section>

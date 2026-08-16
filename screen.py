@@ -26,6 +26,12 @@ class Screen:
     def set_attention(self, state: str) -> None:
         self._send("attention", {"type": "attention", "state": state})
 
+    def set_agent_status(self, state: str, detail: str = "") -> None:
+        """"I am no longer able to hear you." The browser draws the orb from
+        its own microphone, so a broken agent looks identical to a working one
+        until it says otherwise. ``state`` is "degraded" or "closed"."""
+        self._send("attention", {"type": "agent_status", "state": state, "detail": detail})
+
     def _send(self, topic: str, payload: dict[str, Any]) -> None:
         if self.room is None:
             return

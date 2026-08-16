@@ -27,6 +27,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from livekit import agents, api, rtc
 from livekit.agents import AgentSession, room_io
+from livekit.agents.voice.agent_session import SessionConnectOptions
+from livekit.agents.voice.events import CloseReason
 from livekit.plugins import openai, silero
 
 import agent as prompts
@@ -242,7 +244,14 @@ def dbg(label: str, **fields: Any) -> None:
 
 def prewarm(proc: agents.JobProcess) -> None:
     dbg("PREWARM_START")
-    proc.userdata["vad"] = silero.VAD.load()
+    # This is the "how long do we wait before deciding he stopped" dial, and
+    # it is the single biggest piece of the gap between the user going quiet
+    # and the LLM being asked - the rest of that path measures ~140ms. Too
+    # low and a mid-sentence breath ends the turn; too high and the assistant
+    # feels slow. Silero's own default is 0.55s.
+    proc.userdata["vad"] = silero.VAD.load(
+        min_silence_duration=float(os.getenv("VAD_MIN_SILENCE_SECONDS", "0.55")),
+    )
     dbg("PREWARM_DONE")
 
 
@@ -311,6 +320,19 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     assistant = Assistant()
     session = AgentSession[AssistantDeps](
         userdata=AssistantDeps(inbox=inbox, memory=memory),
+        # LiveKit closes the whole session after this many *consecutive*
+        # unrecoverable errors from STT, LLM or TTS, and the STT counter only
+        # resets on a transcript. Its default of 3 is far too tight for a
+        # hand-started local stack: an ASR server that comes up a minute after
+        # the agent burns all three before a single transcript can reset them,
+        # and the session dies before the user has said anything. The pipeline
+        # rebuilds a failed stream by itself, so a generous budget only means
+        # "keep trying while a service is coming back".
+        conn_options=SessionConnectOptions(
+            max_unrecoverable_errors=int(
+                os.getenv("SESSION_MAX_UNRECOVERABLE_ERRORS", "10")
+            ),
+        ),
         vad=ctx.proc.userdata["vad"],
         stt=stt,
         llm=llm,
@@ -365,6 +387,43 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         text = event.text.strip()
         if text:
             inbox.put_nowait(UserSaidText(text, from_text_input=True))
+
+    # ---- failures: say so, out loud, to the log and to the browser ------
+    # Without these a dying session is invisible. The orb is drawn from the
+    # browser's own microphone state, so a session that has closed still looks
+    # like it is listening: red, labelled "聞いています", and deaf. Every
+    # component failure now leaves a line in the log naming which one it was.
+
+    @session.on("error")
+    def _on_session_error(event: Any) -> None:
+        error = getattr(event, "error", None)
+        recoverable = bool(getattr(error, "recoverable", False))
+        source = getattr(event, "source", None)
+        dbg(
+            "SESSION_ERROR",
+            component=getattr(error, "type", type(error).__name__),
+            provider=getattr(source, "provider", type(source).__name__),
+            model=getattr(source, "model", ""),
+            recoverable=recoverable,
+            error=repr(getattr(error, "error", error)),
+        )
+        if not recoverable:
+            screen.set_agent_status(
+                "degraded", str(getattr(error, "type", "") or "unknown")
+            )
+
+    @session.on("close")
+    def _on_session_close(event: Any) -> None:
+        reason = getattr(event, "reason", None)
+        reason_text = getattr(reason, "value", str(reason))
+        dbg("SESSION_CLOSED", reason=reason_text, error=repr(getattr(event, "error", None)))
+        if reason is not CloseReason.ERROR:
+            return  # a normal shutdown; the job is already on its way out
+        # The session is done but the agent is still a participant, so the
+        # browser would keep talking to a corpse. Tell it, then leave the room
+        # so it also sees the participant go and can start a fresh dispatch.
+        screen.set_agent_status("closed", reason_text)
+        ctx.shutdown(reason="agent session closed on an unrecoverable error")
 
     @ctx.room.on("data_received")
     def _on_data(packet: rtc.DataPacket) -> None:

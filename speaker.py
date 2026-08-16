@@ -17,6 +17,8 @@ from livekit.agents import tts as lk_tts
 
 from events import SpeechFinished, SpeechInterrupted
 
+import timing
+
 REPLY = "reply"
 REPORT = "report"
 NOTICE = "notice"
@@ -86,6 +88,7 @@ class Speaker:
     def start_reply(self, user_text: str, *, context: str = "") -> str:
         """A user turn. The LLM answers and may call tools."""
         self._use(REPLY)
+        timing.mark("llm_request", chars=len(user_text))
         extra = {"instructions": context} if context else {}
         handle = self.session.generate_reply(
             user_input=user_text,

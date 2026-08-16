@@ -8,9 +8,10 @@
 # Safe to re-run: every step is idempotent (upserts config, regenerates certs
 # to match the current LAN IP, restarts containers).
 #
-# Usage: scripts/setup_https_livekit.sh [LAN_IP]
-#   LAN_IP defaults to this machine's outbound-routing IP (auto-detected).
-#   Pass one explicitly if you want a fixed hostname/IP instead.
+# Usage: scripts/setup_https_livekit.sh [HOST]
+#   HOST is the browser-facing address. It is taken from the argument, else
+#   from PUBLIC_HOST in .env, and only as a last resort auto-detected - so a
+#   host pinned in .env stays pinned across re-runs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,8 +29,13 @@ warn() { printf '\033[1;33m!! %s\033[0m\n' "$1"; }
 # 1. Target host
 # ---------------------------------------------------------------------------
 LAN_IP="${1:-${LAN_IP:-}}"
+if [ -z "$LAN_IP" ] && [ -f "$ENV_FILE" ]; then
+    LAN_IP="$(sed -n 's/^PUBLIC_HOST=//p' "$ENV_FILE" | tail -1)"
+    [ -n "$LAN_IP" ] && log "Using PUBLIC_HOST from .env: $LAN_IP"
+fi
 if [ -z "$LAN_IP" ]; then
     LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+    warn "No host given and none in .env - auto-detected $LAN_IP. Pass one explicitly to pin it."
 fi
 if [ -z "$LAN_IP" ]; then
     warn "Could not auto-detect a LAN IP; pass one explicitly: scripts/setup_https_livekit.sh <ip>"
@@ -78,6 +84,7 @@ set_env() {
 touch "$ENV_FILE"
 # Browser-facing origin: Caddy terminates TLS here and proxies /rtc* to
 # LiveKit (7880) and everything else to server.py's plain-HTTP uvicorn.
+set_env "PUBLIC_HOST" "${LAN_IP}"
 set_env "PUBLIC_LIVEKIT_URL" "wss://${LAN_IP}:51027"
 set_env "TEXT_TEST_HTTPS_HOSTS" "localhost,127.0.0.1,${LAN_IP}"
 set_env "TEXT_TEST_PORT" "51028"
@@ -87,6 +94,8 @@ set_env "LIVEKIT_NODE_IP" "${LAN_IP}"
 # ---------------------------------------------------------------------------
 # 4. HTTPS certificate (trustme CA - reused by server.py, Caddy, Vite)
 # ---------------------------------------------------------------------------
+# Deleting first matters: the generator reuses an existing certificate, so a
+# changed host would otherwise keep the old, now-wrong SAN list.
 log "Generating HTTPS certificate for: localhost, 127.0.0.1, ${LAN_IP}"
 rm -f "$CERT_DIR"/text-test-*.pem
 uv run python -c "
@@ -100,8 +109,9 @@ print(f'  ca:   {ca}')
 # ---------------------------------------------------------------------------
 # 5. Caddyfile: match the site address to the detected host
 # ---------------------------------------------------------------------------
-log "Updating Caddyfile"
-sed -i -E "s#^https://[^ ]+ \{#https://${LAN_IP}:51027 {#" "$CADDYFILE"
+# Nothing to rewrite: the Caddyfile reads {$PUBLIC_HOST}, which compose passes
+# in from .env. Left as a step so the numbering matches the sections above.
+log "Caddyfile reads PUBLIC_HOST from .env - no edit needed"
 
 # ---------------------------------------------------------------------------
 # 6. Bring up LiveKit + Caddy

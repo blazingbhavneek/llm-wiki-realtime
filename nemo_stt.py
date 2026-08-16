@@ -66,6 +66,8 @@ from livekit.agents import (
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
 from livekit.agents.utils import AudioBuffer, is_given
 
+import timing
+
 logger = logging.getLogger("nemo_stt")
 
 # LiveKit runs the agent in a subprocess whose logging config is its own, so
@@ -323,6 +325,7 @@ class SpeechStream(stt.SpeechStream):
                         self._start_speaking()
                     elif ev.type == vad.VADEventType.END_OF_SPEECH:
                         _dbg("vad_end_of_speech")
+                        timing.start("eos")
                         self._stop_speaking()
                         await commit()
             except (aiohttp.ClientError, ConnectionError) as e:
@@ -373,6 +376,7 @@ class SpeechStream(stt.SpeechStream):
                     partial = ""
                     text = (event.get("transcript") or "").strip()
                     _dbg("final", text=text)
+                    timing.mark("stt_final", chars=len(text))
                     if text:
                         self._event_ch.send_nowait(
                             stt.SpeechEvent(

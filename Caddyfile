@@ -3,7 +3,11 @@
     auto_https disable_redirects
 }
 
-https://10.136.215.175:51027 {
+# The site address comes from PUBLIC_HOST in .env, passed into the container by
+# docker-compose.caddy.yml, so the browser-facing address is set in exactly one
+# place. The certificate must cover that same name - regenerate it after a
+# change with: scripts/setup_https_livekit.sh $PUBLIC_HOST
+https://{$PUBLIC_HOST}:51027 {
     tls /etc/caddy/certs/text-test-cert.pem /etc/caddy/certs/text-test-key.pem
 
     # LiveKit's signaling WebSocket and validation endpoint.

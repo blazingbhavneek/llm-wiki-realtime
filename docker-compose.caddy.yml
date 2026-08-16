@@ -17,6 +17,10 @@ services:
     restart: unless-stopped
     depends_on:
       - livekit-server
+    # The Caddyfile reads this as {$PUBLIC_HOST}; compose takes it from .env,
+    # so the browser-facing address is configured in one place.
+    environment:
+      PUBLIC_HOST: "${PUBLIC_HOST:?set PUBLIC_HOST in .env}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./certs:/etc/caddy/certs:ro

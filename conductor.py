@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import agent as prompts
+import timing
 from attention import OPEN, Attention
 from events import (
     BACKGROUND,
@@ -195,6 +196,8 @@ class Conductor:
 
         if not turn.accepted:
             return  # not for us; the transcript is discarded
+
+        timing.mark("accepted", command=turn.command)
 
         # Speech accepted mid-report is a real barge-in.
         if self.speaker.busy:
