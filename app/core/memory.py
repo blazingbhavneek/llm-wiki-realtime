@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from events import BACKGROUND, FOREGROUND
+from app.core.events import BACKGROUND, FOREGROUND
 
 NEW = "new"
 REPORTING = "reporting"

@@ -1,7 +1,7 @@
 """Placeholder llm-wiki backend, for live ASR/LLM testing without the real RAG service.
 
-research.py (the only file that talks to the real backend) expects an SSE
-stream of ``run -> plan -> level_start -> level -> done`` frames from
+app/rag/llm_wiki.py (the only file that talks to the real backend) expects an
+SSE stream of ``run -> plan -> level_start -> level -> done`` frames from
 ``POST {LLM_WIKI_BASE_URL}/{LLM_WIKI_PREFIX}/{LLM_WIKI_DATABASE}/api/ask/realtime/stream``,
 plus a ``POST .../api/agent-runs/{run_id}/stop`` to cancel one. This serves
 just that shape with a fixed placeholder answer, so a `research_wiki` tool
@@ -9,6 +9,8 @@ call completes instead of erroring out - useful for exercising the full
 ASR -> LLM -> report -> TTS loop while the real wiki backend isn't reachable.
 Not a stand-in for wiki content: the answer text is always the same dummy
 string, never a real lookup.
+
+Run it with ``python -m app.rag.placeholder``.
 """
 
 from __future__ import annotations

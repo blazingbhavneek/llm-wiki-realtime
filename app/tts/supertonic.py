@@ -1,8 +1,16 @@
-"""OpenAI-compatible ``/v1/audio/speech`` server around the local Supertonic-3 TTS SDK.
+"""Supertonic-3: the provider the agent talks to, and the server that hosts it.
 
-Runs the model directly in this process (ONNX Runtime, CPU) so ``server.py``'s
-``openai.TTS`` client can point ``TTS_BASE_URL`` at this server the same way it
-would point at a real OpenAI-compatible endpoint.
+The second half of this file is an OpenAI-compatible ``/v1/audio/speech``
+server around the local Supertonic-3 TTS SDK. It runs the model directly in
+that process (ONNX Runtime, CPU) so the ``openai.TTS`` client below can point
+``TTS_BASE_URL`` at this server the same way it would point at a real
+OpenAI-compatible endpoint. ``serve()`` — what ``python -m app.tts.supertonic``
+runs — is that server.
+
+The heavy dependencies (supertonic/onnxruntime, soundfile, numpy,
+huggingface_hub, uvicorn) are imported inside the functions that need them, so
+``build()`` — the path the agent process takes — pulls in none of them. Only
+the host needs them installed.
 """
 
 from __future__ import annotations
@@ -12,18 +20,65 @@ import io
 import json
 import os
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import numpy as np
-import soundfile as sf
-import uvicorn
-from dotenv import load_dotenv
+# FastAPI is the one server import that stays at module scope: the routes below
+# are registered on ``app`` at import time, and FastAPI resolves their
+# annotations against this module's globals. It costs nothing on the client
+# path - the agent process already runs a FastAPI web server. The imports that
+# would cost something (supertonic/onnxruntime, soundfile, numpy,
+# huggingface_hub, uvicorn) live inside the functions that use them, so
+# ``build()`` pulls in none of them.
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from huggingface_hub import snapshot_download
-from supertonic import TTS
 
-load_dotenv(override=True)
+from app.tts.base import TTSProvider, TTSSettings
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import numpy as np
+    from livekit.agents import tts as lk_tts
+    from supertonic import TTS
+
+
+class SupertonicTTS(TTSProvider):
+    name = "supertonic"
+    hosted_by = "self"
+
+    default_model = "supertonic-3"
+    default_voice = "F1"
+    default_base_url = "http://127.0.0.1:8004/v1"
+    default_response_format = "wav"
+    native_sample_rate = 44100
+    streams_audio = False
+    honors_instructions = False
+
+    default_reply_min_chars = 30
+    default_report_min_chars = 180
+
+    def build(self, settings: TTSSettings) -> "lk_tts.TTS":
+        from livekit.plugins import openai
+
+        return openai.TTS(
+            model=settings.model,
+            voice=settings.voice,
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            # tts_server.py returns Supertonic's native 44.1kHz WAV; "wav" lets
+            # LiveKit's own decoder resample it, unlike "pcm" which assumes raw
+            # 24kHz samples already on the wire.
+            response_format=settings.response_format,
+            # The OpenAI-compatible adapter forwards this as the request's
+            # `instructions` field. tts_server.py ignores it - Supertonic's
+            # language pin is TTS_LANG, read server-side - but it's harmless to
+            # keep sending for parity with other OpenAI-compatible TTS servers.
+            instructions=settings.instructions,
+        )
+
+    def serve(self, settings: TTSSettings) -> None:
+        main()
+
+
+# --- the server ------------------------------------------------------------
 
 app = FastAPI()
 
@@ -43,6 +98,9 @@ def get_engine() -> TTS:
     ``Supertone/supertonic-3`` instead of Supertonic's own duplicate
     ``~/.cache/supertonic3`` download path.
     """
+    from huggingface_hub import snapshot_download
+    from supertonic import TTS
+
     global _engine
     if _engine is None:
         model_dir = os.getenv("SUPERTONIC_MODEL_DIR") or snapshot_download(
@@ -61,6 +119,8 @@ def get_voice_style(name: str) -> Any:
 
 
 def wav_bytes(wav: np.ndarray, sample_rate: int) -> bytes:
+    import soundfile as sf
+
     buf = io.BytesIO()
     sf.write(buf, wav.reshape(-1), sample_rate, format="WAV", subtype="PCM_16")
     return buf.getvalue()
@@ -69,6 +129,8 @@ def wav_bytes(wav: np.ndarray, sample_rate: int) -> bytes:
 def pcm16_bytes(wav: np.ndarray, src_rate: int, dst_rate: int = 24000) -> bytes:
     """Raw PCM16LE mono, resampled to ``dst_rate`` (linear interpolation is
     plenty for speech and keeps this dependency-free beyond numpy)."""
+    import numpy as np
+
     samples = wav.reshape(-1).astype(np.float32)
     if src_rate != dst_rate and samples.size:
         duration = samples.shape[0] / src_rate
@@ -155,6 +217,15 @@ async def audio_speech(request: Request) -> Response:
 
 
 def main() -> None:
+    # Deliberately not at import time: this module is imported by the agent
+    # process too, and load_dotenv(override=True) there would clobber the
+    # environment the worker was started with.
+    from dotenv import load_dotenv
+
+    load_dotenv(override=True)
+
+    import uvicorn
+
     # Warm the model at boot rather than on the first request.
     get_engine()
     uvicorn.run(

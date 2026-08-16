@@ -41,6 +41,11 @@ equivalent:
   an uninterruptible speech plays, which is what server.py needs for barge-in.
 
 So ``asr_server.py`` leaves endpointing off and this drives the commits.
+
+That launcher now lives at the bottom of this file as ``serve()`` - run it with
+``python -m app.stt.nemotron`` - so the client and the server it talks to are
+one module, and the reason ``--endpointing`` stays off sits next to the VAD
+commit that replaces it.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlencode
 
 import aiohttp
@@ -66,7 +72,8 @@ from livekit.agents import (
 from livekit.agents.types import NOT_GIVEN, NotGivenOr
 from livekit.agents.utils import AudioBuffer, is_given
 
-import timing
+from app import timing
+from app.stt.base import STTProvider, STTSettings
 
 logger = logging.getLogger("nemo_stt")
 
@@ -249,7 +256,7 @@ class SpeechStream(stt.SpeechStream):
             )
         except (asyncio.TimeoutError, aiohttp.ClientError, ConnectionError) as e:
             # As an APIConnectionError this is retryable, so the agent survives
-            # being started before `uv run asr_server.py` is listening.
+            # being started before `uv run python -m app.stt.nemotron` is listening.
             raise APIConnectionError(f"cannot reach nemo-speech at {url}") from e
 
         # Flat session shape, and it has to go out before the first audio byte:
@@ -411,3 +418,102 @@ class SpeechStream(stt.SpeechStream):
             await utils.aio.cancel_and_wait(*tasks)
             await vad_stream.aclose()
             await ws.close()
+
+
+class NemotronProvider(STTProvider):
+    """NVIDIA Nemotron 3.5 streaming ASR, hosted here by NeMo-Speech.cpp."""
+
+    name = "nemotron"
+    hosted_by = "self"
+
+    default_model = "nvidia/nemotron-3.5-asr-streaming-0.6b"
+    default_base_url = "http://127.0.0.1:8003/v1"
+    default_language = "ja-JP"
+    native_sample_rate = DEFAULT_SAMPLE_RATE
+
+    requires_vad = True
+    emits_interim = True
+    finals_are_utterances = True
+    language_is_locale = True
+
+    def build(self, settings: STTSettings, *, vad: object | None = None) -> stt.STT:
+        if vad is None:
+            raise ValueError("NemotronSTT requires a VAD to mark the end of a turn")
+        return NemotronSTT(
+            model=settings.model,
+            base_url=settings.base_url,
+            api_key=settings.api_key,
+            # Must stay a full locale. openai.STT sent the base tag only, which
+            # this model does not have a language prompt for, so every turn was
+            # silently language-detected instead of pinned - see nemo_stt.
+            language=settings.language,
+            sample_rate=settings.sample_rate,
+            automatic_punctuation=settings.automatic_punctuation,
+            # The same VAD the session uses, so one speech segment is one final is
+            # one UserSaidText - the streaming ASR keeps _on_transcript's
+            # "every final is a complete utterance" assumption true.
+            vad=vad,
+        )
+
+    def serve(self, settings: STTSettings | None = None) -> None:
+        """Exec the vendored engine. See ``main()`` below."""
+        main()
+
+
+# --------------------------------------------------------------------------
+# The server side: launches the local ASR server
+# (OpenAI-compatible ``/v1/audio/transcriptions`` plus the realtime WebSocket
+# the client above speaks).
+#
+# The engine itself is NVIDIA/NeMo-Speech.cpp, a compiled C++ binary built once
+# with ``scripts/build_asr_server.sh`` (CPU backend, so it never touches the GPU
+# reserved for the LLM). This just execs it with this project's model/env
+# conventions, so ``uv run python -m app.stt.nemotron`` sits alongside
+# ``uv run python -m app.tts.supertonic`` and ``uv run python -m app``.
+# --------------------------------------------------------------------------
+
+# app/stt/nemotron.py -> app/stt -> app -> the repository root.
+ROOT = Path(__file__).resolve().parents[2]
+BINARY = ROOT / "vendor" / "NeMo-Speech.cpp" / "build" / "cpu-server" / "bin" / "nemo-speech"
+DEFAULT_MODEL = ROOT / "models" / "nemotron-3.5-asr-streaming-0.6b.q8_0.gguf"
+
+
+def main() -> None:
+    # Deliberately not at import time: this module is imported by the agent
+    # process too, and load_dotenv(override=True) there would clobber the
+    # environment the worker was started with.
+    from dotenv import load_dotenv
+
+    load_dotenv(override=True)
+
+    if not BINARY.exists():
+        raise SystemExit(
+            f"ASR engine binary not found at {BINARY}\n"
+            "Build it once with: bash scripts/build_asr_server.sh"
+        )
+
+    model_path = Path(os.getenv("ASR_MODEL_PATH", str(DEFAULT_MODEL)))
+    if not model_path.exists():
+        raise SystemExit(f"ASR model not found at {model_path}")
+
+    args = [
+        str(BINARY),
+        "serve",
+        "--asr-model",
+        str(model_path),
+        "--host",
+        os.getenv("ASR_SERVER_HOST", "0.0.0.0"),
+        "--port",
+        os.getenv("ASR_SERVER_PORT", "8003"),
+        "--no-ui",
+        # Endpointing is deliberately left off. It would emit a final at every
+        # trailing-silence pause, and server.py treats each final as a whole
+        # user utterance, so one spoken question would arrive as several.
+        # nemo_stt.NemotronSTT commits on VAD end-of-speech instead, which is
+        # the same turn boundary the batch pipeline had.
+    ]
+    os.execv(str(BINARY), args)
+
+
+if __name__ == "__main__":
+    main()

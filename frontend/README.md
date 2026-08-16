@@ -24,10 +24,10 @@ Use headphones during the delayed microphone test to avoid acoustic feedback.
 ```bash
 npm run build
 cd ..
-python server.py dev
+uv run python -m app dev
 ```
 
 `npm run build` always uses production mode. The resulting `frontend/dist`
 connects to `/token` and LiveKit; it includes no scripted research and never
-enables the local audio loopback. `server.py` serves the built files and runs
-the LiveKit agent.
+enables the local audio loopback. `python -m app` serves the built files and
+runs the LiveKit agent.

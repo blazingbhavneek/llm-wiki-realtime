@@ -1,27 +1,27 @@
-===============================================================================
- llm-wiki-realtime - how to run it
-===============================================================================
+# llm-wiki-realtime — how to run it
 
 Ports, and who owns them:
 
-  51027  Caddy (Docker)      HTTPS/WSS - THE ONLY PORT THE BROWSER USES
-  51028  server.py           plain HTTP - behind Caddy, do not open directly
-   7880  livekit-server      LiveKit signalling + media (Docker, host network)
-   8000  llama-server        LLM            (started outside this repo)
-   8003  asr_server.py       ASR  (Nemotron 3.5, CPU)
-   8004  tts_server.py       TTS  (Supertonic-3, CPU)
-   8005  llm_wiki_placeholder.py   RAG stand-in
-   8081  livekit agent worker health port (opened by server.py)
+```
+  51027  Caddy (Docker)                 HTTPS/WSS - THE ONLY PORT THE BROWSER USES
+  51028  python -m app                  plain HTTP - behind Caddy, do not open directly
+   7880  livekit-server                 LiveKit signalling + media (Docker, host network)
+   8000  llama-server                   LLM  (started outside this repo)
+   8003  python -m app.stt.nemotron     ASR  (Nemotron 3.5, CPU)
+   8004  python -m app.tts.supertonic   TTS  (Supertonic-3, CPU)
+   8005  python -m app.rag.placeholder  RAG stand-in
+   8081  livekit agent worker health port (opened by python -m app)
+```
 
 All addresses live in .env. Nothing is auto-detected.
 
+---
 
--------------------------------------------------------------------------------
- 1. START EVERYTHING
--------------------------------------------------------------------------------
+## 1. START EVERYTHING
 
 Order matters: Docker and the LLM first, then the model servers, then the agent.
 
+```bash
   # a) LiveKit + Caddy (reads PUBLIC_HOST and LIVEKIT_NODE_IP from .env)
   docker compose -f docker-compose.caddy.yml up -d
 
@@ -32,10 +32,17 @@ Order matters: Docker and the LLM first, then the model servers, then the agent.
     --host 0.0.0.0 --port 8000 -ngl 99 -np 3 -c 196608 --alias gemma
 
   # c) One per terminal, from the repo root
-  uv run asr_server.py             # ASR   :8003
-  uv run tts_server.py             # TTS   :8004
-  uv run llm_wiki_placeholder.py   # RAG   :8005
-  uv run server.py                 # agent + web :51028   <- start this LAST
+  uv run python -m app.stt.nemotron     # ASR   :8003
+  uv run python -m app.tts.supertonic   # TTS   :8004
+  uv run python -m app.rag.placeholder  # RAG   :8005
+  uv run python -m app                  # agent + web :51028   <- start this LAST
+```
+
+Once `uv sync` has installed the project, the same four processes are also
+available as console scripts — `uv run wiki-asr`, `uv run wiki-tts`,
+`uv run wiki-rag-stub`, `uv run wiki-agent`. They are equivalent; the module
+form above works without an install, which is why it is what this document
+uses.
 
 Start the agent LAST and not the other way round. It is not cosmetic: the
 agent closes its session after a run of failures against a component that is
@@ -45,19 +52,23 @@ budget before the first word is spoken.
 Keep the agent's output. It is the only place that names which component
 broke, and terminal scrollback is gone by the time you need it:
 
-  uv run server.py 2>&1 | tee /tmp/agent.log
+```bash
+  uv run python -m app 2>&1 | tee /tmp/agent.log
+```
 
 Then open:
 
+```
   https://localhost:51027
+```
 
 NOT https://localhost:51028 - see TROUBLESHOOTING below.
 
+---
 
--------------------------------------------------------------------------------
- 2. STOP EVERYTHING
--------------------------------------------------------------------------------
+## 2. STOP EVERYTHING
 
+```bash
   # the four uv servers: Ctrl-C in each terminal, or by port:
   for P in 8003 8004 8005 51028 8081; do
     for PID in $(ss -ltnp | grep ":$P " | grep -oP 'pid=\K[0-9]+' | sort -u); do
@@ -67,54 +78,76 @@ NOT https://localhost:51028 - see TROUBLESHOOTING below.
 
   # Docker
   docker compose -f docker-compose.caddy.yml down
+```
 
-Two traps with pkill, which is why the loop above kills by port instead:
-  - `pkill -f "uv run server.py"` matches the shell running it, so it kills
-    your own terminal.
-  - `pkill -f "server\.py$"` also matches asr_server.py - the pattern is a
-    substring match on the whole command line, and "asr_server.py" ends with
-    "server.py". You lose the ASR server without noticing.
+The processes are now `python -m app`, `python -m app.stt.nemotron`,
+`python -m app.tts.supertonic` and `python -m app.rag.placeholder`, so each one
+has a distinct name on the command line and can be killed on its own:
 
+```bash
+  pkill -f "python -m app$"                  # the agent + web process only
+  pkill -f "python -m app\.stt\.nemotron"    # ASR
+  pkill -f "python -m app\.tts\.supertonic"  # TTS
+  pkill -f "python -m app\.rag\.placeholder" # RAG stand-in
+```
 
--------------------------------------------------------------------------------
- 3. TRUST THE CERTIFICATE (once per machine, and again after any reissue)
--------------------------------------------------------------------------------
+The old footgun is gone: `pkill -f "server\.py$"` used to also match
+`asr_server.py` — the pattern is a substring match on the whole command line,
+and "asr_server.py" ends with "server.py" — so stopping the agent silently took
+the ASR server with it. No module name is a suffix of another, so that cannot
+happen any more. Anchor the agent's pattern with `$` anyway: without it,
+`python -m app` is a prefix of every other one.
+
+The other trap still applies: `pkill -f "uv run python -m app"` matches the
+shell running it, so it kills your own terminal. Kill the `python` process (the
+patterns above), or kill by port (the loop above), not the `uv run` wrapper.
+
+---
+
+## 3. TRUST THE CERTIFICATE (once per machine, and again after any reissue)
 
 The certificate is self-signed (generated by trustme), so the browser warns
 until its CA is trusted. Regenerating the cert makes a NEW CA, so any
 previously imported one becomes useless and must be re-imported.
 
+```
   CA file: certs/text-test-ca.pem
 
   Firefox: Settings -> Privacy & Security -> Certificates -> View Certificates
            -> Authorities -> Import -> tick "Trust this CA to identify websites"
   Chrome / system trust on Arch:
            sudo trust anchor certs/text-test-ca.pem
+```
 
 Clicking through the browser warning also works for testing, but Firefox will
 not let a WebSocket (wss://) through an untrusted cert that way - so the page
 loads and the microphone silently never connects. Import the CA properly.
 
+---
 
--------------------------------------------------------------------------------
- 4. MOVING TO THE WORK PC  (or any time the IP changes)
--------------------------------------------------------------------------------
+## 4. MOVING TO THE WORK PC  (or any time the IP changes)
 
 Two values in .env, and they must both be the address the BROWSER can reach.
 If the browser runs on the same machine as the servers, "localhost" is fine.
 If the browser is on another machine, use this machine's static IP.
 
+```
   PUBLIC_HOST=<address>          # e.g. 10.0.0.50   - browser-facing origin
   LIVEKIT_NODE_IP=<same address> # media/ICE candidates LiveKit advertises
+```
 
 PUBLIC_LIVEKIT_URL must match PUBLIC_HOST:
 
+```
   PUBLIC_LIVEKIT_URL=wss://<address>:51027
+```
 
 Then reissue the certificate for the new name and restart the containers:
 
+```bash
   scripts/setup_https_livekit.sh          # no argument: reads PUBLIC_HOST
   docker compose -f docker-compose.caddy.yml up -d --force-recreate
+```
 
 and re-import certs/text-test-ca.pem in the browser (new CA).
 
@@ -124,47 +157,77 @@ the browser, the page connects and then hangs, and the agent log shows
 "wait_pc_connection timed out". Leaving it at 127.0.0.1 while browsing from
 another machine causes exactly that.
 
-
- --- Splitting services across machines ---
+### Splitting services across machines
 
 Each service is one URL in .env. Point it at the machine that runs it; nothing
 else changes. Every one of these must be reachable FROM THE AGENT machine
-(the one running server.py), not from the browser:
+(the one running `python -m app`), not from the browser:
 
+```
   LLM_BASE_URL=http://<gpu-box>:8000/v1
   STT_BASE_URL=http://<asr-box>:8003/v1
   TTS_BASE_URL=http://<tts-box>:8004/v1
   LLM_WIKI_BASE_URL=http://<rag-box>:8005
+```
 
 The service must bind 0.0.0.0, not 127.0.0.1, or nothing outside its machine
 can reach it. All three already default to 0.0.0.0; the env vars are there if
 you ever need to narrow them:
 
-  ASR_SERVER_HOST             asr_server.py
-  TTS_SERVER_HOST             tts_server.py
-  LLM_WIKI_PLACEHOLDER_HOST   llm_wiki_placeholder.py
+```
+  ASR_SERVER_HOST             python -m app.stt.nemotron
+  TTS_SERVER_HOST             python -m app.tts.supertonic
+  LLM_WIKI_PLACEHOLDER_HOST   python -m app.rag.placeholder
   llama-server --host 0.0.0.0 as shown above
+```
 
+---
 
--------------------------------------------------------------------------------
- 5. TROUBLESHOOTING
--------------------------------------------------------------------------------
+## 5. SWITCHING A COMPONENT
+
+Four variables in .env pick which engine each provider package loads. Changing
+one is a restart of the affected process, not an edit to any Python file. The
+registered names, and what each one expects, are in the package README next to
+the code: `app/stt/README.md`, `app/tts/README.md`, `app/llm/README.md`,
+`app/rag/README.md`.
+
+```
+  STT_PROVIDER    nemotron | voxtral            (default nemotron)
+  TTS_PROVIDER    supertonic | qwen3            (default supertonic)
+  LLM_PROVIDER    openai_compatible             (default openai_compatible)
+  RAG_PROVIDER    llm_wiki                      (default llm_wiki)
+```
+
+Switching an *endpoint* is what it has always been - `TTS_BASE_URL=…`.
+Switching an *engine* is one of the lines above, and the per-engine defaults
+(model id, voice, audio format, sample rate, language handling) come with it
+from the provider class. Only the two locally-hosted providers have a server to
+start: `python -m app.stt.nemotron` and `python -m app.tts.supertonic`. The
+vLLM-hosted ones (`voxtral`, `qwen3`) are client-only — point their `*_BASE_URL`
+at the box that serves them and start nothing here.
+
+---
+
+## 6. TROUBLESHOOTING
 
 SSL_ERROR_RX_RECORD_TOO_LONG on 127.0.0.1:51028
-  You opened https:// on the plain-HTTP port. 51028 is server.py, which sits
-  BEHIND Caddy and speaks no TLS; the browser read an HTTP response as a TLS
-  record. Use https://localhost:51027.
+  You opened https:// on the plain-HTTP port. 51028 is the agent's web server,
+  which sits BEHIND Caddy and speaks no TLS; the browser read an HTTP response
+  as a TLS record. Use https://localhost:51027.
   (http://localhost:51028 - note http, not https - does work from this
   machine, because localhost counts as a secure context so the microphone is
   still allowed. It only fails from another machine, which is what the proxy
   on 51027 exists for.)
 
-Browser cannot connect to wss://<ip>:51027 at all
+Browser cannot connect to wss://\<ip\>:51027 at all
   Caddy is not running, or PUBLIC_HOST does not match the address you typed.
   Caddy serves exactly ONE site address - the one in PUBLIC_HOST - and ignores
   every other name even when the certificate covers it.
+
+```bash
     docker compose -f docker-compose.caddy.yml ps
     docker logs livekit-tls-proxy
+```
 
 "wait_pc_connection timed out" in the agent log
   LIVEKIT_NODE_IP is not reachable from the browser. See section 4.
@@ -183,7 +246,9 @@ It worked for a few turns and then went deaf; the orb still turns red
 
   It now announces itself instead. In the agent log:
 
+```bash
     grep -E "SESSION_ERROR|SESSION_CLOSED" /tmp/agent.log
+```
 
   SESSION_ERROR names the component ("component": "stt_error" / "llm_error" /
   "tts_error"), the URL it could not reach, and whether it was recoverable.
@@ -194,25 +259,28 @@ It worked for a few turns and then went deaf; the orb still turns red
 
   A run of these means a backend went away - check the port from the log
   (section 1) and restart that server. See also
-  SESSION_MAX_UNRECOVERABLE_ERRORS in section 6.
+  SESSION_MAX_UNRECOVERABLE_ERRORS in section 7.
 
 Agent starts but immediately exits with "FastAPI server failed to start"
-  A previous server.py still holds 51028. Kill it (section 2) and retry.
+  A previous `python -m app` still holds 51028. Kill it (section 2) and retry.
 
 The agent is running old code
-  server.py imports at boot; editing a file does not affect a running agent.
-  Restart it after any change to *.py.
+  `python -m app` imports at boot; editing a file does not affect a running
+  agent. Restart it after any change to *.py.
 
 Two servers on one port
   Both bind with SO_REUSEPORT and requests are split between them at random,
   which looks like intermittent failure. Check with:
+
+```bash
     ss -ltnp | grep <port>
+```
 
+---
 
--------------------------------------------------------------------------------
- 6. DEBUG FLAGS  (env vars on server.py)
--------------------------------------------------------------------------------
+## 7. DEBUG FLAGS  (env vars on `python -m app`)
 
+```
   TURN_TIMING=1              per-turn latency breakdown:
                                eos -> stt_final -> accepted -> llm_request
   NEMO_STT_DEBUG=1           STT trace: WebSocket connect, session config,
@@ -234,20 +302,25 @@ Two servers on one port
                                late can exhaust it before the first word).
                                Set it to 1 to watch the failure path on
                                purpose.
+```
 
-  Example:
-    TURN_TIMING=1 NEMO_STT_DEBUG=1 uv run server.py 2>&1 | tee /tmp/agent.log
+Example:
 
+```bash
+    TURN_TIMING=1 NEMO_STT_DEBUG=1 uv run python -m app 2>&1 | tee /tmp/agent.log
+```
 
--------------------------------------------------------------------------------
- 7. REBUILDING
--------------------------------------------------------------------------------
+---
 
-  # frontend (server.py serves frontend/dist)
+## 8. REBUILDING
+
+```bash
+  # frontend (the agent's web server serves frontend/dist)
   cd frontend && npm install && npm run build
 
   # ASR engine (only needed once, or after pulling NeMo-Speech.cpp)
   bash scripts/build_asr_server.sh
 
   # tests
-  python -m unittest test_realtime_modules -q
+  python -m unittest discover -s tests -t . -q
+```

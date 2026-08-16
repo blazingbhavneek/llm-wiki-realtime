@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the local ASR engine (NVIDIA/NeMo-Speech.cpp, CPU backend, HTTP server)
-# used by asr_server.py. Safe to re-run — each step skips work already done.
+# used by app/stt/nemotron.py. Safe to re-run — each step skips work already done.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,4 +36,4 @@ cmake --build --preset cpu-server -j"$(nproc)"
 
 echo
 echo "Built: $VENDOR/build/cpu-server/bin/nemo-speech"
-echo "Run the server with: uv run asr_server.py"
+echo "Run the server with: uv run python -m app.stt.nemotron"

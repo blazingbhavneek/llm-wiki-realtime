@@ -1,21 +1,16 @@
-"""LLM instructions and the three tools. Talks to the inbox and to Memory.
+"""Every string the user can hear.
 
-A tool never starts work itself. It posts one event and returns, so the
-Conductor stays the only thing that decides what happens next.
+The greeting, the fixed notices, the assistant's standing instructions and the
+two prompt builders that turn internal evidence into speech all live here, so
+that changing what the assistant says never means opening a wiring file.
 """
 
 from __future__ import annotations
 
-import asyncio
 import re
-from dataclasses import dataclass
 from typing import Any
 
-from livekit.agents import Agent, RunContext, function_tool
-from livekit.agents.llm import StopResponse
-
-from events import ResearchRequested, ResearchStopRequested
-from memory import LevelResult, Memory
+from app.core.memory import LevelResult
 
 GREETING = "こんにちは。社内Wikiを検索できます。音声またはテキストで質問してください。"
 
@@ -57,52 +52,6 @@ ASSISTANT_INSTRUCTIONS = (
     "research_wiki を呼んだ直後は、調査開始、計画、途中経過、画面の案内、推測した回答を音声で言わず、"
     "その応答を終了してください。調査結果は別の指示が音声にします。"
 )
-
-
-@dataclass
-class AssistantDeps:
-    """Everything the tools are allowed to touch."""
-
-    inbox: asyncio.Queue
-    memory: Memory
-
-
-@function_tool
-async def research_wiki(ctx: RunContext[AssistantDeps], question: str) -> str:
-    """Search the internal Wiki for a question that needs company-specific facts."""
-    ctx.userdata.inbox.put_nowait(ResearchRequested(question))
-    # Tool-level stop is deliberate: a prompt alone cannot reliably stop a model
-    # from voicing a speculative "I'll look that up" before the answer exists.
-    raise StopResponse()
-
-
-@function_tool
-async def read_result(ctx: RunContext[AssistantDeps], handle: str) -> str:
-    """Read a retained Wiki result before answering a related follow-up question."""
-    level: LevelResult | None = ctx.userdata.memory.find(handle)
-    if level is None:
-        return "保持している調査結果はまだありません。"
-    return f"[観点] {level.objective}\n[質問] {level.question}\n[内容]\n{level.text}"
-
-
-@function_tool
-async def stop_research(ctx: RunContext[AssistantDeps]) -> str:
-    """Stop every running Wiki investigation."""
-    ctx.userdata.inbox.put_nowait(ResearchStopRequested())
-    raise StopResponse()
-
-
-class Assistant(Agent):
-    def __init__(self) -> None:
-        super().__init__(
-            instructions=ASSISTANT_INSTRUCTIONS,
-            tools=[research_wiki, read_result, stop_research],
-        )
-
-    async def on_user_turn_completed(self, turn_ctx: Any, new_message: Any) -> None:
-        # The pipeline's own reply is always suppressed. Attention decides
-        # whether this was a turn, and the Conductor asks for the reply.
-        raise StopResponse()
 
 
 # ---------------------------------------------------------------------------

@@ -11,12 +11,12 @@ import asyncio
 import os
 from collections import deque
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import agent as prompts
-import timing
-from attention import OPEN, Attention
-from events import (
+from app import timing
+from app.agent import prompts
+from app.core.attention import OPEN, Attention
+from app.core.events import (
     BACKGROUND,
     FOREGROUND,
     IdleTick,
@@ -34,10 +34,12 @@ from events import (
     UserStartedSpeaking,
     UserStoppedSpeaking,
 )
-from memory import NEW, PARTIAL, LevelResult, Memory
-from research import ResearchPool
-from screen import Screen
-from speaker import Speaker
+from app.core.memory import NEW, PARTIAL, LevelResult, Memory
+from app.core.screen import Screen
+from app.core.speaker import Speaker
+
+if TYPE_CHECKING:
+    from app.rag.base import ResearchBackend
 
 # How many reports may pass before a background finding stops being worth
 # saying. Deliberately dumb: a slightly over-talkative coworker is a much
@@ -61,7 +63,7 @@ class Conductor:
         inbox: asyncio.Queue,
         attention: Attention,
         speaker: Speaker,
-        pool: ResearchPool,
+        pool: "ResearchBackend",
         memory: Memory,
         screen: Screen,
     ) -> None:

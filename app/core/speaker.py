@@ -8,29 +8,17 @@ barge-in is always processed within one event.
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from typing import Any
 
-from livekit.agents import tokenize
-from livekit.agents import tts as lk_tts
+from app.core.events import SpeechFinished, SpeechInterrupted
 
-from events import SpeechFinished, SpeechInterrupted
-
-import timing
+from app import timing
 
 REPLY = "reply"
 REPORT = "report"
 NOTICE = "notice"
 NONE = "none"
-
-
-def _sentence_tokenizer(min_sentence_len: int) -> Any:
-    return tokenize.basic.SentenceTokenizer(
-        language="japanese",
-        min_sentence_len=min_sentence_len,
-        stream_context_len=int(os.getenv("TTS_STREAM_CONTEXT_CHARS", "240")),
-    )
 
 
 @dataclass
@@ -41,7 +29,7 @@ class Speech:
 
 
 class Speaker:
-    def __init__(self, session: Any, agent: Any, base_tts: Any, inbox: asyncio.Queue) -> None:
+    def __init__(self, session: Any, agent: Any, tts_pair: dict[str, Any], inbox: asyncio.Queue) -> None:
         self.session = session
         self.agent = agent
         self.inbox = inbox
@@ -50,24 +38,9 @@ class Speaker:
         self._tasks: set[asyncio.Task] = set()
         self._tts_kind = ""
 
-        # Two TTS configurations, not one. Conversation wants first audio fast;
-        # research prose wants one coherent synthesis with stable prosody, which
-        # a short threshold destroys by splitting a reply into many independent
-        # non-streaming requests.
-        self._tts = {
-            REPLY: lk_tts.StreamAdapter(
-                tts=base_tts,
-                sentence_tokenizer=_sentence_tokenizer(
-                    int(os.getenv("TTS_REPLY_MIN_SENTENCE_CHARS", "30"))
-                ),
-            ),
-            REPORT: lk_tts.StreamAdapter(
-                tts=base_tts,
-                sentence_tokenizer=_sentence_tokenizer(
-                    int(os.getenv("TTS_REPORT_MIN_SENTENCE_CHARS", "180"))
-                ),
-            ),
-        }
+        # The two configurations are built by app.tts.build_tts_pair; Speaker
+        # only picks between them.
+        self._tts = dict(tts_pair)
 
     # -- state -------------------------------------------------------------
 
