@@ -140,7 +140,12 @@ class Conductor:
 
         if isinstance(event, PlanReady):
             run = self.pool.get(event.run_id)
-            if run is not None and run.focus == FOREGROUND and event.planned_levels:
+            if run is None:
+                return
+            # Every run, foreground or not: the plan is what lets a follow-up be
+            # told "that is coming" instead of opening a second run for it.
+            self.memory.note_plan(run, event.planned_levels)
+            if run.focus == FOREGROUND and event.planned_levels:
                 self.pending.append(
                     Pending("prompt", prompts.plan_preview_instructions(run.question, event.planned_levels))
                 )
@@ -157,19 +162,28 @@ class Conductor:
             if run is not None and self.pool.can_retry(run):
                 self.pool.retry(run)
                 return
+            self.memory.close_plan(event.run_id)
             self.pending.append(Pending("notice", prompts.NOTICE_RESEARCH_FAILED))
             return
 
         if isinstance(event, ResearchFinished):
-            # Nothing to do: levels were remembered as they arrived, and the
-            # idle timer unpins by itself once no run is active.
+            # Levels were remembered as they arrived and the idle timer unpins
+            # itself, but whatever the plan promised and never sent is not
+            # coming: stop telling follow-ups to wait for it.
+            self.memory.close_plan(event.run_id)
             return
 
         if isinstance(event, SpeechFinished):
             self.speaker.on_speech_ended(event.speech_id)
             level = self.speaking_level.pop(event.speech_id, None)
             if level is not None:
-                self.memory.mark_reported(level)
+                # An empty report is the pass declining to speak this level, not
+                # a delivery. It stays retrievable, and it does not age the
+                # background findings, because the user heard nothing.
+                if event.spoken_text.strip():
+                    self.memory.mark_reported(level, event.spoken_text)
+                else:
+                    self.memory.mark_silent(level)
             return
 
         if isinstance(event, SpeechInterrupted):
@@ -219,6 +233,7 @@ class Conductor:
                 self.pending.append(Pending("notice", prompts.NOTICE_NOTHING_TO_REPEAT))
             else:
                 level.spoken_text = ""
+                level.forced = True  # asked for out loud, so it may not be skipped
                 self.memory.mark_new(level)
             return
 
@@ -242,10 +257,14 @@ class Conductor:
             self.memory.set_focus(current.run_id, BACKGROUND)
         run = self.pool.start(question)
         self.stopped_runs.discard(run.run_id)
+        # Fixed text, no LLM round trip: fills the gap before the plan
+        # preview (PlanReady, below) has anything to say.
+        self.pending.append(Pending("notice", prompts.NOTICE_RESEARCHING))
 
     async def stop_everything(self) -> None:
         for run in self.pool.runs.values():
             self.stopped_runs.add(run.run_id)
+            self.memory.close_plan(run.run_id)
         await self.pool.cancel_all()
         for level in self.memory.levels:
             if level.state in (NEW, PARTIAL):
@@ -301,6 +320,12 @@ class Conductor:
 
     def report(self, level: LevelResult, *, resume: bool = False, attribute: bool = False) -> None:
         step, step_count, next_objective = self.position_of(level)
+        spoken_so_far = self.memory.spoken_for(level.run_id, exclude=level)
+        # The answer to a question is never optional, so the skip door only opens
+        # once this question has been answered at all. A resume owes the rest of
+        # a sentence, and `forced` is an explicit ask; neither may go silent.
+        may_skip = bool(spoken_so_far) and not resume and not level.forced
+        level.forced = False
         prompt = prompts.report_instructions(
             level,
             step=step,
@@ -308,6 +333,8 @@ class Conductor:
             next_objective=next_objective,
             resume=resume,
             attribute=attribute,
+            spoken_so_far=spoken_so_far,
+            may_skip=may_skip,
         )
         self.memory.mark_reporting(level)
         speech_id = self.speaker.start_report(prompt)

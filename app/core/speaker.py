@@ -150,7 +150,7 @@ class Speaker:
         if getattr(speech.handle, "interrupted", False):
             self.inbox.put_nowait(SpeechInterrupted(speech.speech_id, spoken))
         else:
-            self.inbox.put_nowait(SpeechFinished(speech.speech_id))
+            self.inbox.put_nowait(SpeechFinished(speech.speech_id, spoken))
 
 
 def _spoken_text(handle: Any) -> str:

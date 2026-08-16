@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from app.agent.tools import NO_RETAINED_RESULT, read_retained
 from app.core.attention import DORMANT, OPEN
 from app.core.events import (
     BACKGROUND,
@@ -12,6 +13,7 @@ from app.core.events import (
     ListenButtonChanged,
     PlanReady,
     ResearchFailed,
+    ResearchFinished,
     SpeechInterrupted,
     UserSaidText,
     UserStartedSpeaking,
@@ -59,7 +61,9 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         conductor = build()
         speaker, memory = conductor.speaker, conductor.memory
         run_a = conductor.pool.start("A")
-        conductor.start_research("B")  # A becomes background
+        conductor.start_research("B")  # A becomes background, queues an immediate notice
+        await conductor.speak_next()  # starts that notice
+        await feed(conductor, speaker.finish())  # and clears it before the level ladder runs
         run_b = conductor.pool.foreground_run()
 
         old = memory.remember(run_a, level_event("a1", "Aの答え"))
@@ -83,7 +87,9 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         conductor = build()
         speaker, memory = conductor.speaker, conductor.memory
         run_a = conductor.pool.start("A")
-        conductor.start_research("B")
+        conductor.start_research("B")  # queues an immediate notice
+        await conductor.speak_next()  # starts that notice
+        await feed(conductor, speaker.finish())  # and clears it before the level ladder runs
         run_b = conductor.pool.foreground_run()
 
         # three foreground reports pass while A sits in the background
@@ -163,6 +169,78 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conductor.attention.state, OPEN)
         await feed(conductor, ListenButtonChanged(False))
         self.assertEqual(conductor.attention.state, DORMANT)
+
+    async def test_a_level_that_adds_nothing_is_never_spoken(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("mpf_buf とは")
+
+        first = memory.remember(run, level_event("l1", "バッファの答え", 1, "役割の確認"))
+        await feed(conductor, IdleTick())
+        # the first answer to a question is owed to the user whatever it contains
+        self.assertNotIn("何も話さないでください", speaker.started[-1][1])
+        await feed(conductor, speaker.finish("バッファの役割はこうです。"))
+        self.assertEqual(first.state, REPORTED)
+        self.assertEqual(memory.reports_delivered, 1)
+
+        extra = memory.remember(run, level_event("l2", "周辺の実装例", 2, "関連機能の整理"))
+        await feed(conductor, IdleTick())
+        prompt = speaker.started[-1][1]
+        self.assertIn("何も話さないでください", prompt)
+        self.assertIn("バッファの役割はこうです。", prompt)  # judged against what was said
+        await feed(conductor, speaker.finish(""))  # the pass declines to speak it
+
+        self.assertEqual(extra.state, SILENT)
+        self.assertEqual(memory.reports_delivered, 1)  # nothing heard, nothing aged
+        self.assertIs(memory.find("関連機能の整理"), extra)  # still readable later
+
+    async def test_a_repeat_speaks_even_though_it_repeats(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("mpf_buf とは")
+        memory.remember(run, level_event("l1", "役割の答え", 1, "役割の確認"))
+        await feed(conductor, IdleTick())
+        await feed(conductor, speaker.finish("役割はこうです。"))
+        memory.remember(run, level_event("l2", "引数の答え", 2, "引数の意味"))
+        await feed(conductor, IdleTick())
+        await feed(conductor, speaker.finish("引数はこうです。"))
+
+        await feed(conductor, ListenButtonChanged(True))
+        await feed(conductor, UserSaidText("もう一度言って"))
+        self.assertNotIn("何も話さないでください", speaker.started[-1][1])
+
+    async def test_the_live_plan_is_what_a_follow_up_waits_on(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("mpf_buf とは")
+        plan = [
+            {"id": "l1", "objective": "役割の確認", "position": 1},
+            {"id": "l2", "objective": "引数の意味", "position": 2},
+            {"id": "l3", "objective": "戻り値の確認", "position": 3},
+        ]
+        await feed(conductor, PlanReady(run.run_id, plan))
+        self.assertEqual(
+            [entry.objective for entry in memory.pending],
+            ["役割の確認", "引数の意味", "戻り値の確認"],
+        )
+        await feed(conductor, speaker.finish("これから確認します。"))  # the plan preview
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "役割の答え", 1, "役割の確認")))
+        self.assertEqual([entry.objective for entry in memory.pending], ["引数の意味", "戻り値の確認"])
+        await feed(conductor, speaker.finish("役割はこうです。"))
+
+        # a follow-up about a level that has not arrived waits instead of researching
+        self.assertIn("調査中", read_retained(memory, "引数の意味"))
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l2", "引数の答え", 2, "引数の意味")))
+        # it arrives asked for, so this one may not be dropped as redundant
+        self.assertNotIn("何も話さないでください", speaker.started[-1][1])
+        await feed(conductor, speaker.finish("引数はこうです。"))
+
+        # once the run is over, what never arrived is not coming: research again
+        await feed(conductor, ResearchFinished(run.run_id, "complete"))
+        self.assertEqual(memory.pending, ())
+        self.assertEqual(read_retained(memory, "戻り値の確認"), NO_RETAINED_RESULT)
 
     async def test_levels_are_never_dropped_while_the_user_speaks(self):
         conductor = build()

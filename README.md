@@ -66,6 +66,15 @@ Tests (offline, no GPU and no network):
 python -m unittest discover -s tests -t . -q
 ```
 
+Every registered STT/TTS provider also has a live test that exercises its
+real `build()` result — the self-hosted engines against the actual model on
+disk, the vLLM-hosted ones against an endpoint you point at — see
+[`tests/live/README.md`](tests/live/README.md):
+
+```bash
+python -m unittest discover -s tests/live -t . -p "live_*.py" -q
+```
+
 ## Switch a component
 
 One variable per package, in `.env`. Nothing else changes — the model id, the

@@ -143,6 +143,10 @@ def run_combined_server() -> None:
                 entrypoint_fnc=entrypoint,
                 prewarm_fnc=prewarm,
                 agent_name=Settings.from_env().livekit.agent_name,
+                # The library's own default (8081) is a plain constructor
+                # arg, not an env var - see LiveKitSettings.agent_http_port.
+                port=Settings.from_env().livekit.agent_http_port,
+                log_level=Settings.from_env().livekit.agent_log_level,
                 load_fnc=worker_load,
                 load_threshold=0.95,
                 num_idle_processes=1,

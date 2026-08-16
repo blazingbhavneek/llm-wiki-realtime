@@ -50,6 +50,8 @@ class LiveKitSettings:
     agent_name: str  # LIVEKIT_AGENT_NAME
     manual_dispatch: bool  # LIVEKIT_MANUAL_DISPATCH
     max_unrecoverable_errors: int  # SESSION_MAX_UNRECOVERABLE_ERRORS
+    agent_http_port: int  # LIVEKIT_AGENT_HTTP_PORT
+    agent_log_level: str  # LIVEKIT_AGENT_LOG_LEVEL
 
     @classmethod
     def from_env(cls) -> "LiveKitSettings":
@@ -61,6 +63,16 @@ class LiveKitSettings:
             agent_name=env_str("LIVEKIT_AGENT_NAME", "japanese-wiki-agent"),
             manual_dispatch=env_bool("LIVEKIT_MANUAL_DISPATCH", True),
             max_unrecoverable_errors=env_int("SESSION_MAX_UNRECOVERABLE_ERRORS", 10),
+            # livekit-agents logs tool-call execution (which function, what
+            # args) at DEBUG, invisible at its prod default of INFO. Same
+            # unannounced-default situation as agent_http_port above.
+            agent_log_level=env_str("LIVEKIT_AGENT_LOG_LEVEL", "INFO"),
+            # livekit-agents' own default (8081) is not configurable through
+            # its own env - it's a WorkerOptions(port=...) constructor arg -
+            # so this project exposes it the same way it exposes every other
+            # port, rather than leaving an unannounced bind that can collide
+            # with an unrelated service already on 8081.
+            agent_http_port=env_int("LIVEKIT_AGENT_HTTP_PORT", 8081),
         )
 
 

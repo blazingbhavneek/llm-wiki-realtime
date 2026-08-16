@@ -90,6 +90,9 @@ class ResearchFinished:
 @dataclass(frozen=True)
 class SpeechFinished:
     speech_id: str
+    # What the report actually said. Empty means the LLM pass judged this level
+    # not worth speaking and emitted nothing, which is a decision, not a failure.
+    spoken_text: str = ""
 
 
 @dataclass(frozen=True)

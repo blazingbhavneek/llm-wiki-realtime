@@ -71,10 +71,11 @@ class FakeSpeaker:
         self.ducked = False
 
     # test helpers
-    def finish(self, speech_id=None):
+    def finish(self, spoken="そのようになっています。", speech_id=None):
+        """A speech that ran to the end. Pass "" for a report that said nothing."""
         speech_id = speech_id or self._current
         self._current = None
-        return SpeechFinished(speech_id)
+        return SpeechFinished(speech_id, spoken)
 
     def cut(self, spoken, speech_id=None):
         speech_id = speech_id or self._current

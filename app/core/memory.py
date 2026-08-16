@@ -1,7 +1,10 @@
-"""Every result ever received, spoken or not.
+"""Every result ever received, spoken or not, and every result still coming.
 
 Not speaking something is not the same as forgetting it: SILENT and REPORTED
 levels stay here forever and ``find`` can still reach both.
+
+The plan of a live run is kept here too, so that "we have not looked that up"
+and "that answer is on its way" can be told apart before anything has arrived.
 """
 
 from __future__ import annotations
@@ -40,6 +43,9 @@ class LevelResult:
     spoken_text: str = ""  # the narration already delivered, not a slice of `text`
     serial: int = 0  # arrival order, the only ordering Memory trusts
     reported_serial: int = 0
+    # This level was explicitly asked for, so the report pass may not decide it
+    # is not worth speaking. Set by a repeat, or by a follow-up that waited for it.
+    forced: bool = False
 
     @property
     def spoken_char_count(self) -> int:
@@ -57,9 +63,27 @@ class LevelResult:
         return self.text
 
 
+@dataclass
+class PendingObjective:
+    """A planned level that has not arrived yet.
+
+    The plan names every objective up front, long before the levels complete, so
+    a follow-up can be told "that is being looked into" instead of opening a
+    second run for something the first run is already fetching.
+    """
+
+    run_id: str
+    question: str
+    objective: str
+    level_id: str = ""
+    focus: str = FOREGROUND
+    asked: bool = False  # a follow-up is waiting on this one
+
+
 class Memory:
     def __init__(self) -> None:
         self._levels: list[LevelResult] = []
+        self._pending: list[PendingObjective] = []
         self._keys: set[tuple[str, str]] = set()
         self._fingerprints: set[tuple[str, str]] = set()
         self._serial = 0
@@ -73,6 +97,10 @@ class Memory:
     def reports_delivered(self) -> int:
         """Monotonic count of finished reports. Used to age background findings."""
         return self._reports
+
+    @property
+    def pending(self) -> tuple[PendingObjective, ...]:
+        return tuple(self._pending)
 
     # -- writing -----------------------------------------------------------
 
@@ -102,12 +130,60 @@ class Memory:
         self._keys.add(key)
         self._fingerprints.add(fingerprint)
         self._levels.append(result)
+        self._settle(result)
         return result
+
+    def note_plan(self, run: RunLike, planned_levels: list[dict[str, Any]]) -> None:
+        """Record what this run still owes. Replaces the run's previous plan, so
+        a revised plan shrinks the pending set instead of stacking onto it."""
+        waited_on = {
+            entry.objective
+            for entry in self._pending
+            if entry.asked and entry.run_id == run.run_id
+        }
+        self._pending = [entry for entry in self._pending if entry.run_id != run.run_id]
+        # A retry replays what already completed under fresh level ids, so the
+        # objective, not the id, is what says "this one is already in".
+        arrived = {level.objective for level in self._levels if level.run_id == run.run_id}
+        for item in sorted(planned_levels, key=lambda item: int(item.get("position") or 0)):
+            level_id = str(item.get("id") or item.get("level_id") or "")
+            objective = str(item.get("objective") or "")
+            if not objective or objective in arrived or (run.run_id, level_id) in self._keys:
+                continue  # already arrived; the level itself is the answer now
+            self._pending.append(
+                PendingObjective(
+                    run_id=run.run_id,
+                    question=run.question,
+                    objective=objective,
+                    level_id=level_id,
+                    focus=run.focus,
+                    asked=objective in waited_on,
+                )
+            )
+
+    def close_plan(self, run_id: str) -> None:
+        """The run is over. Whatever never arrived is not coming."""
+        self._pending = [entry for entry in self._pending if entry.run_id != run_id]
+
+    def _settle(self, result: LevelResult) -> None:
+        """An arrival cancels its own pending entry, and inherits the wait."""
+        for entry in tuple(self._pending):
+            if entry.run_id != result.run_id:
+                continue
+            same_id = bool(entry.level_id) and entry.level_id == result.level_id
+            same_objective = bool(entry.objective) and entry.objective == result.objective
+            if same_id or same_objective:
+                result.forced = result.forced or entry.asked
+                self._pending.remove(entry)
+                return
 
     def set_focus(self, run_id: str, focus: str) -> None:
         for level in self._levels:
             if level.run_id == run_id:
                 level.focus = focus
+        for entry in self._pending:
+            if entry.run_id == run_id:
+                entry.focus = focus
 
     def mark_reporting(self, level: LevelResult) -> None:
         level.state = REPORTING
@@ -150,6 +226,42 @@ class Memory:
                 return level
         return None
 
+    def spoken_for(self, run_id: str, exclude: LevelResult | None = None) -> str:
+        """What this question has already been told, in the order it was said.
+
+        The report pass needs it to judge whether the level in front of it adds
+        anything; without it "do not repeat the previous step" is unenforceable.
+        """
+        lines = [
+            f"{level.objective}: {level.spoken_text.strip()}"
+            for level in self._levels
+            if level.run_id == run_id and level is not exclude and level.spoken_text.strip()
+        ]
+        return "\n".join(lines)[-800:]
+
+    def await_pending(self, handle: str) -> PendingObjective | None:
+        """A follow-up the live plan already covers, or None.
+
+        Only the foreground run is consulted: a background run's plan must never
+        make a genuinely new question look like it is already being answered.
+        Matching marks the objective as waited on, which is what later stops its
+        level from being judged not worth speaking.
+        """
+        candidates = [entry for entry in self._pending if entry.focus == FOREGROUND]
+        if not candidates:
+            return None
+        needle = (handle or "").strip().lower()
+        if not needle:
+            best = candidates[0]  # plan order: the next thing we will know
+        else:
+            tokens = set(_tokens(needle))
+            scored = [(_pending_score(needle, tokens, entry), entry) for entry in candidates]
+            score, best = max(scored, key=lambda pair: pair[0])
+            if not score:
+                return None
+        best.asked = True
+        return best
+
     def _first(self, focus: str, state: str) -> LevelResult | None:
         candidates = [
             level for level in self._levels if level.focus == focus and level.state == state
@@ -159,11 +271,15 @@ class Memory:
         return min(candidates, key=lambda level: (level.position, level.serial))
 
     def find(self, handle: str) -> LevelResult | None:
-        """Fuzzy on purpose.
+        """Fuzzy, but it is allowed to miss.
 
-        Returning "not found" while any level exists pushes the LLM into opening
-        a redundant research run, which is far worse than reading a slightly
-        wrong level.
+        Still generous: an empty handle means "the latest", and a partial or
+        misspelled one still resolves by token overlap. What it will not do is
+        hand back an unrelated level for a handle that matches nothing. That
+        fallback used to exist to avoid a redundant research run, but a level
+        about a neighbouring topic is exactly what the model needs to answer a
+        genuinely new question without looking it up. A redundant run is the
+        cheaper mistake.
         """
         if not self._levels:
             return None
@@ -180,22 +296,49 @@ class Memory:
 
         tokens = set(_tokens(needle))
         if tokens:
+            # Both sides lowercased: `needle` already is, and an un-normalised
+            # haystack made every handle containing ASCII score zero.
             scored = [
-                (len(tokens & set(_tokens(f"{level.objective} {level.question} {level.text}"))), level)
+                (
+                    len(
+                        tokens
+                        & set(
+                            _tokens(
+                                f"{level.objective} {level.question} {level.text}".lower()
+                            )
+                        )
+                    ),
+                    level,
+                )
                 for level in self._levels
             ]
             best_score, best = max(scored, key=lambda pair: (pair[0], pair[1].serial))
             if best_score:
                 return best
-        return self._levels[-1]
+        return None
 
     def summary_for_llm(self) -> str:
-        if not self._levels:
-            return ""
-        lines = ["[保持している調査結果]", "handle\t状態\t質問"]
-        for level in self._levels[-12:]:
-            lines.append(f"{level.objective}\t{level.state}\t{level.question}")
+        lines: list[str] = []
+        if self._levels:
+            lines += ["[保持している調査結果]", "handle\t状態\t質問"]
+            lines += [
+                f"{level.objective}\t{level.state}\t{level.question}"
+                for level in self._levels[-12:]
+            ]
+        # Named, not just counted: the model has to be able to tell whether the
+        # follow-up in front of it is one of these before it opens a second run.
+        waiting = [entry for entry in self._pending if entry.focus == FOREGROUND]
+        if waiting:
+            lines += ["[調査中でまだ届いていない観点]"]
+            lines += [entry.objective for entry in waiting[:8]]
         return "\n".join(lines)
+
+
+def _pending_score(needle: str, tokens: set[str], entry: PendingObjective) -> int:
+    haystack = f"{entry.objective} {entry.question}".lower()
+    if needle in haystack or (entry.objective and entry.objective.lower() in needle):
+        return 100
+    return len(tokens & set(_tokens(haystack)))
 
 
 def _tokens(text: str) -> list[str]:
@@ -212,4 +355,5 @@ __all__ = [
     "SILENT",
     "LevelResult",
     "Memory",
+    "PendingObjective",
 ]

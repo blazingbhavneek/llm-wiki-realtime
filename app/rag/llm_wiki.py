@@ -40,7 +40,9 @@ VOICE_KNOBS: dict[str, int] = {
     "search_limit": 16,
     "max_context_chars": 32_000,
     "min_initial_read_nodes": 16,
-    "deadline_seconds": 90,
+    # Matches the backend's overall run budget (raised 260 -> 600 while its LLM
+    # endpoint is slow); a lower client-requested value overrides that budget.
+    "deadline_seconds": 600,
 }
 
 
