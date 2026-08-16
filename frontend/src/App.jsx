@@ -13,13 +13,6 @@ import Composer from './components/Composer'
 const APP_MODE = import.meta.env.VITE_APP_MODE || (import.meta.env.DEV ? 'dev' : 'prod')
 const DEV_MODE = APP_MODE === 'dev'
 
-const ORB_LABEL = {
-  dormant: '待機中',
-  listening: '聞いています',
-  thinking: '調べています',
-  speaking: '話しています',
-}
-
 export default function App() {
   const [connected, setConnected] = useState(DEV_MODE)
   // Tracked separately from `connected`: the room stays up perfectly well
@@ -444,7 +437,6 @@ export default function App() {
     }
   }
 
-  const levelsDone = research.levels.filter(level => level.result).length
   // Connected to the room is not the same as having someone to talk to.
   const ready = connected && agentPresent
 
@@ -489,17 +481,6 @@ export default function App() {
           >
             <WaveField bus={bus} state={orbState} />
           </button>
-
-          <div className="text-center">
-            <p className="m-0 text-[15px] font-semibold tracking-[0.06em] text-ink">{ORB_LABEL[mode]}</p>
-            <p className="m-0 text-[12.5px] tabular-nums text-faint">
-              {thinking
-                ? `段階 ${levelsDone + 1} / ${research.levels.length || '?'} を調査中`
-                : listening
-                  ? DEV_MODE ? '1秒後に音声を返しています' : '聞いています。もう一度押すと停止します'
-                  : DEV_MODE ? '円を押すと1秒遅延の音声テスト' : '円を押して話しかける'}
-            </p>
-          </div>
         </div>
 
         {error && (

@@ -19,6 +19,7 @@ from app.core.events import (
     FOREGROUND,
     LevelReady,
     PlanReady,
+    PlanRevised,
     ResearchFailed,
     ResearchFinished,
     ResearchProgress,
@@ -247,6 +248,11 @@ class ResearchRun:
             if version > self._plan_version:
                 self._plan_version = version
                 self.planned_levels = list(frame.get("levels") or self.planned_levels)
+                # `planned_levels` is read live by the report pass, but Memory
+                # keeps its own copy of what is still owed. Only a revision the
+                # run actually accepted is announced, so a stale re-broadcast
+                # cannot resurrect objectives this plan already dropped.
+                self.inbox.put_nowait(PlanRevised(self.run_id, self.planned_levels))
             progress.put_nowait("plan_update")
             return False
 

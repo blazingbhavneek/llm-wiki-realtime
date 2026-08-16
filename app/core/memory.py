@@ -135,17 +135,27 @@ class Memory:
 
     def note_plan(self, run: RunLike, planned_levels: list[dict[str, Any]]) -> None:
         """Record what this run still owes. Replaces the run's previous plan, so
-        a revised plan shrinks the pending set instead of stacking onto it."""
-        waited_on = {
-            entry.objective
-            for entry in self._pending
-            if entry.asked and entry.run_id == run.run_id
-        }
+        a revised plan shrinks the pending set instead of stacking onto it.
+
+        Called for the first plan and for every revision the backend sends. A
+        revision routinely rewords an objective while keeping its id, so who is
+        waiting on what is carried over by either handle.
+        """
+        waited_on: set[str] = set()
+        for entry in self._pending:
+            if entry.asked and entry.run_id == run.run_id:
+                waited_on.add(entry.objective)
+                if entry.level_id:
+                    waited_on.add(entry.level_id)
         self._pending = [entry for entry in self._pending if entry.run_id != run.run_id]
         # A retry replays what already completed under fresh level ids, so the
         # objective, not the id, is what says "this one is already in".
         arrived = {level.objective for level in self._levels if level.run_id == run.run_id}
         for item in sorted(planned_levels, key=lambda item: int(item.get("position") or 0)):
+            # A stage the backend dropped is not owed. Left pending, it tells a
+            # follow-up its answer is "being looked into" and never arrives.
+            if str(item.get("status") or "") == "skipped":
+                continue
             level_id = str(item.get("id") or item.get("level_id") or "")
             objective = str(item.get("objective") or "")
             if not objective or objective in arrived or (run.run_id, level_id) in self._keys:
@@ -157,7 +167,7 @@ class Memory:
                     objective=objective,
                     level_id=level_id,
                     focus=run.focus,
-                    asked=objective in waited_on,
+                    asked=objective in waited_on or (bool(level_id) and level_id in waited_on),
                 )
             )
 
@@ -238,6 +248,32 @@ class Memory:
             if level.run_id == run_id and level is not exclude and level.spoken_text.strip()
         ]
         return "\n".join(lines)[-800:]
+
+    def last_closing_line(self, run_id: str, exclude: LevelResult | None = None) -> str:
+        """The final sentence of the last thing said about this question.
+
+        The report pass builds its hand-off line out of the next objective alone,
+        so two stages whose objectives read alike - which is precisely what a
+        mid-run plan split produces - close with the same sentence twice, and the
+        explanation stops sounding like it is going anywhere. `spoken_for` does
+        carry that sentence, but as content not to repeat; the pass is told to
+        drop repeated *facts*, and a hand-off line is not a fact. Quoting the
+        previous close on its own is what makes it visible as a close.
+        """
+        spoken = [
+            level
+            for level in self._levels
+            if level.run_id == run_id and level is not exclude and level.spoken_text.strip()
+        ]
+        if not spoken:
+            return ""
+        # Delivery order, not arrival order: reported_serial is the only record
+        # of what the user actually heard last.
+        latest = max(spoken, key=lambda level: (level.reported_serial, level.serial))
+        sentences = [
+            part.strip() for part in re.split(r"(?<=[。！？!?])", latest.spoken_text.strip()) if part.strip()
+        ]
+        return sentences[-1][-120:] if sentences else ""
 
     def await_pending(self, handle: str) -> PendingObjective | None:
         """A follow-up the live plan already covers, or None.

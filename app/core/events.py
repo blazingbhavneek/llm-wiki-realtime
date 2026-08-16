@@ -55,6 +55,21 @@ class PlanReady:
 
 
 @dataclass(frozen=True)
+class PlanRevised:
+    """The backend re-planned mid-run: a stage added, split, or dropped.
+
+    Deliberately not a second `PlanReady`. The first plan is announced out loud;
+    a revision is bookkeeping only, because a spoken turn per plan tweak is the
+    exact verbosity this design spends its budget avoiding. What a revision owes
+    the user reaches them through the step counter and the hand-off line of the
+    next report, which already read the live plan.
+    """
+
+    run_id: str
+    planned_levels: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class LevelReady:
     run_id: str
     level: dict[str, Any]  # raw SSE level event

@@ -71,12 +71,24 @@ const FRAGMENT_SHADER = [
   '  float t = u_time;',
   '  float e = u_level;',
   '  float r = length(uv);',
+  '  float theta = atan(uv.y, uv.x);',
   '',
-  '  // Keep the silhouette genuinely round. Audio changes the whole radius',
-  '  // together, rather than putting noisy or high-frequency lobes on its rim.',
+  '  // The big audio-reactive grow lives outside the shader now (CSS transform',
+  '  // on the canvas, up to 1.5x). This stays a small internal nudge so the',
+  '  // rim keeps some texture without ever pushing the circle past the edge',
+  '  // of its own backing buffer.',
   '  float spectrum = (u_b0 + u_b1 + u_b2 + u_b3 + u_b4 + u_b5) / 6.0;',
   '  float R = 0.425 + 0.003 * sin(t * 0.62)',
   '                  + 0.014 * e + 0.002 * spectrum;',
+  '',
+  '  // A few low-order angular harmonics, keyed to bass/mid/treble bands, bend',
+  '  // the rim into a soft liquid wobble. Smooth cosines only (no noise), so it',
+  '  // reads as a droplet rather than a spiky blob; amplitude rides on e, so the',
+  '  // disc is still genuinely round at rest and only deforms while audio plays.',
+  '  float wobble = 0.50 * u_b0 * cos(theta * 2.0 + t * 1.1)',
+  '               + 0.33 * u_b2 * cos(theta * 3.0 - t * 1.6 + 2.1)',
+  '               + 0.20 * u_b5 * cos(theta * 5.0 + t * 2.3 + 4.2);',
+  '  R += 0.016 * e * wobble;',
   '',
   '  // Domain-warped light inside the orb continues moving at total silence.',
   '  vec2 flow = uv * (3.0 + 0.9 * e);',
@@ -93,9 +105,10 @@ const FRAGMENT_SHADER = [
   '  col = mix(col, WHITE, smoothstep(0.22, 0.48, r) * 0.12);',
   '  col = mix(col, vec3(0.66, 0.82, 1.0), u_think * (0.08 + 0.08 * warp));',
   '',
-  '  // Soft, luminous alpha replaces the hard outlined contour.',
+  '  // Soft, luminous alpha replaces the hard outlined contour. A touch more',
+  '  // feather while loud keeps the liquid edge soft rather than a hard rim.',
   '  float px = 1.0 / min(u_resolution.x, u_resolution.y);',
-  '  float feather = max(0.0045, 2.0 * px);',
+  '  float feather = max(0.0045, 2.0 * px) + 0.005 * e;',
   '  float mask = 1.0 - smoothstep(R - feather, R + feather, r);',
   '  float innerEdge = smoothstep(R - 0.055, R, r);',
   '  vec3 edge = mix(vec3(0.68, 0.83, 1.0), WHITE, u_listen);',
@@ -183,10 +196,12 @@ export default function WaveField({ bus, state }) {
     }
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2)
+    // clientWidth/clientHeight, not getBoundingClientRect: the latter reports
+    // the post-transform rect, which would feed the audio-driven CSS scale
+    // below back into the backing-buffer size and runs away.
     const resize = () => {
-      const rect = canvas.getBoundingClientRect()
-      canvas.width = Math.max(1, Math.round(rect.width * dpr))
-      canvas.height = Math.max(1, Math.round(rect.height * dpr))
+      canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr))
+      canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr))
     }
 
     const accent = [...ACCENTS.dormant]
@@ -220,6 +235,10 @@ export default function WaveField({ bus, state }) {
       // Give ordinary speech enough travel to visibly reshape the rim without
       // making keyboard noise or room tone pulse the disc.
       smooth.level = envelope(smooth.level, Math.min(1, liveLevel * 1.18))
+      // The macro "it's speaking" cue: the whole disc grows up to 1.5x its
+      // resting radius, so it reads from across a room -- not just the shader's
+      // own fine-grained rim reactivity below.
+      canvas.style.transform = `scale(${(1 + 0.5 * smooth.level).toFixed(3)})`
       smooth.think = ease(smooth.think, active.thinking ? 1 : 0, 0.025)
       smooth.listen = ease(smooth.listen, active.mode === 'listening' ? 1 : 0, 0.045)
       for (let i = 0; i < BAND_SLICES.length; i++) {

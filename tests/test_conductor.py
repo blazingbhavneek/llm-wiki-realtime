@@ -12,8 +12,10 @@ from app.core.events import (
     LevelReady,
     ListenButtonChanged,
     PlanReady,
+    PlanRevised,
     ResearchFailed,
     ResearchFinished,
+    ResearchProgress,
     SpeechInterrupted,
     UserSaidText,
     UserStartedSpeaking,
@@ -157,8 +159,6 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_screen_mirrors_raw_frames(self):
         conductor = build()
-        from app.core.events import ResearchProgress
-
         await feed(conductor, ResearchProgress("r1", {"type": "level_start", "level_id": "l1"}))
         self.assertEqual(conductor.screen.frames[-1]["type"], "level_start")
 
@@ -242,6 +242,146 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(memory.pending, ())
         self.assertEqual(read_retained(memory, "戻り値の確認"), NO_RETAINED_RESULT)
 
+    async def test_a_plan_revision_is_tracked_but_never_re_announced(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("__syncthreads とメモリフェンスの違い")
+        run.planned_levels = [
+            {"id": "l1", "objective": "役割を確認する", "position": 1},
+            {"id": "l2", "objective": "違いと使い分けを説明する", "position": 2},
+        ]
+        await feed(conductor, PlanReady(run.run_id, run.planned_levels))
+        self.assertEqual(len(speaker.started), 1)  # the one spoken preview
+        await feed(conductor, speaker.finish("まず役割から確認します。"))
+
+        # the backend splits stage 2 in two, mid-run
+        run.planned_levels = [
+            {"id": "l1", "objective": "役割を確認する", "position": 1},
+            {"id": "l2", "objective": "フェンス関数の種類を整理する", "position": 2},
+            {"id": "l3", "objective": "それぞれの使用場面を説明する", "position": 3},
+        ]
+        await feed(conductor, PlanRevised(run.run_id, run.planned_levels))
+
+        # bookkeeping followed the revision...
+        self.assertEqual(
+            [entry.objective for entry in memory.pending],
+            ["役割を確認する", "フェンス関数の種類を整理する", "それぞれの使用場面を説明する"],
+        )
+        self.assertIn("調査中", read_retained(memory, "使用場面"))
+        # ...and it cost no speech: a turn per plan tweak is the whole problem
+        self.assertEqual(len(speaker.started), 1)
+
+    async def test_a_grown_plan_reaches_the_user_through_the_hand_off(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("__syncthreads とメモリフェンスの違い")
+        run.planned_levels = [
+            {"id": "l1", "objective": "役割を確認する", "position": 1},
+            {"id": "l2", "objective": "フェンス関数の種類を整理する", "position": 2},
+            {"id": "l3", "objective": "それぞれの使用場面を説明する", "position": 3},
+        ]
+        memory.remember(run, level_event("l1", "役割の答え", 1, "役割を確認する"))
+        await feed(conductor, IdleTick())
+
+        prompt = speaker.started[-1][1]
+        self.assertEqual(prompt.count("[説明の段階]\n1 / 3"), 1)
+        # stage 2 is not the end, so the hand-off may not sound like one
+        self.assertIn("次の観点のあとにも段階が残っています", prompt)
+
+        await feed(conductor, speaker.finish("役割はこうです。続けて、使用場面を説明します。"))
+        memory.remember(run, level_event("l3", "使用場面の答え", 3, "それぞれの使用場面を説明する"))
+        await feed(conductor, IdleTick())
+        # the last stage closes instead of promising a fourth
+        self.assertIn("最後の段階では次の調査を予告せず", speaker.started[-1][1])
+
+    async def test_two_reports_never_hand_off_with_the_same_sentence(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("__syncthreads とメモリフェンスの違い")
+        # the objectives of stage 2 and 3 read alike, which is exactly what a
+        # mid-run plan split leaves behind
+        run.planned_levels = [
+            {"id": "l1", "objective": "違いを説明する", "position": 1},
+            {"id": "l2", "objective": "使い分けの場面を整理する", "position": 2},
+            {"id": "l3", "objective": "それぞれの使用場面を説明する", "position": 3},
+        ]
+        memory.remember(run, level_event("l1", "違いの答え", 1, "違いを説明する"))
+        await feed(conductor, IdleTick())
+        # nothing has been said yet, so there is no close to differ from
+        self.assertNotIn("[直前の締めの一文]", speaker.started[-1][1])
+        await feed(conductor, speaker.finish("違いはこうです。続けて、それぞれの具体的な使用場面について説明します。"))
+
+        memory.remember(run, level_event("l2", "種類の答え", 2, "使い分けの場面を整理する"))
+        await feed(conductor, IdleTick())
+        prompt = speaker.started[-1][1]
+        # the sentence it must not reach for again is quoted back on its own,
+        # not merely buried in what was said
+        self.assertIn(
+            "[直前の締めの一文]\n続けて、それぞれの具体的な使用場面について説明します。",
+            prompt,
+        )
+        self.assertIn("言い換えただけのほぼ同じ一文で締めてはいけません", prompt)
+        # and when it genuinely cannot differ, the hand-off is dropped, not faked
+        self.assertIn("次の話題へつなぐ一文自体を省き", prompt)
+
+    async def test_a_cancelled_stage_is_never_announced_as_next(self):
+        # The backend answered the whole question in stage one and dropped the
+        # rest. Nothing announces that; the report simply stops handing off.
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("実行構成の各引数は何を指定するか")
+        run.planned_levels = [
+            {"id": "l1", "objective": "各引数の指定内容を確認する", "position": 1, "status": "complete"},
+            {"id": "l2", "objective": "資料の続きを読み詳細を補う", "position": 2, "status": "skipped"},
+            {"id": "l3", "objective": "触れた用語を先回りして調べる", "position": 3, "status": "skipped"},
+        ]
+        await feed(conductor, PlanRevised(run.run_id, run.planned_levels))
+        memory.remember(run, level_event("l1", "引数の答え", 1, "各引数の指定内容を確認する"))
+        await feed(conductor, IdleTick())
+
+        prompt = speaker.started[-1][1]
+        self.assertEqual(prompt.count("[説明の段階]\n1 / 1"), 1)
+        self.assertIn("最後の段階では次の調査を予告せず", prompt)
+        # the dropped stage is never offered as the thing coming next
+        self.assertNotIn("資料の続きを読み詳細を補う", prompt)
+
+    async def test_a_one_stage_plan_is_previewed_without_promising_a_next_step(self):
+        # The backend plans one stage when it expects to answer in one. Told to
+        # say "what comes first and what comes next", the model fills the slot
+        # with a step that never runs.
+        conductor = build()
+        run = conductor.pool.start("tex1DLayered の3番目の引数は何ですか")
+        await feed(
+            conductor,
+            PlanReady(run.run_id, [{"id": "l1", "objective": "引数の指定内容", "position": 1}]),
+        )
+
+        prompt = conductor.speaker.started[-1][1]
+        self.assertIn("このあとに別の段階が続くと受け取れる言い方は使わないでください", prompt)
+        self.assertIn("手順を分けて説明しないでください", prompt)
+        # the multi-stage phrasing, and its worked example, must be absent
+        self.assertNotIn("まず何から確認し、次に何を見るかまで伝えれば十分です", prompt)
+        self.assertNotIn("そのあと引数の意味を見ます", prompt)
+
+    async def test_the_spoken_preview_does_not_commit_to_a_stage_count(self):
+        conductor = build()
+        run = conductor.pool.start("A")
+        await feed(
+            conductor,
+            PlanReady(
+                run.run_id,
+                [
+                    {"id": "l1", "objective": "役割の確認", "position": 1},
+                    {"id": "l2", "objective": "使い分けの整理", "position": 2},
+                ],
+            ),
+        )
+        prompt = conductor.speaker.started[-1][1]
+        # the plan below this sentence is provisional and the sentence is never
+        # corrected, so it may not close the list
+        self.assertIn("これで全部だと受け取れる言い方をしたりしないでください", prompt)
+        self.assertIn("段階の数を言ったり", prompt)
+
     async def test_levels_are_never_dropped_while_the_user_speaks(self):
         conductor = build()
         run = conductor.pool.start("A")
@@ -250,6 +390,46 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         await feed(conductor, LevelReady(run.run_id, level_event()))
         self.assertEqual(conductor.speaker.started, [])
         self.assertEqual(level.state, NEW)
+
+
+class PlanFrameTests(unittest.IsolatedAsyncioTestCase):
+    """The frame the backend really sends produces the event the table handles.
+
+    Everything above posts `PlanRevised` by hand; this is the one place that
+    checks a `plan_update` frame ever becomes one.
+    """
+
+    def _drain(self, inbox):
+        events = []
+        while not inbox.empty():
+            events.append(inbox.get_nowait())
+        return events
+
+    async def test_a_plan_update_frame_becomes_a_plan_revision(self):
+        import asyncio
+
+        from app.rag.llm_wiki import ResearchRun
+
+        inbox: asyncio.Queue = asyncio.Queue()
+        progress: asyncio.Queue = asyncio.Queue()
+        run = ResearchRun("r1", "質問", inbox)
+
+        first = [{"id": "l1", "objective": "役割", "position": 1}]
+        run._on_frame({"type": "plan", "version": 1, "levels": first}, progress)
+        self.assertEqual([type(event) for event in self._drain(inbox)], [ResearchProgress, PlanReady])
+
+        grown = first + [{"id": "l2", "objective": "使い分け", "position": 2}]
+        run._on_frame({"type": "plan_update", "version": 2, "levels": grown}, progress)
+        events = self._drain(inbox)
+        self.assertEqual([type(event) for event in events], [ResearchProgress, PlanRevised])
+        self.assertEqual(events[-1].planned_levels, grown)
+        self.assertEqual(run.planned_levels, grown)
+
+        # a stale re-broadcast changes nothing and is not worth an event: acting
+        # on it would resurrect objectives version 2 already dropped
+        run._on_frame({"type": "plan_update", "version": 1, "levels": first}, progress)
+        self.assertEqual([type(event) for event in self._drain(inbox)], [ResearchProgress])
+        self.assertEqual(run.planned_levels, grown)
 
 
 if __name__ == "__main__":

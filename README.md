@@ -99,6 +99,10 @@ kept. Copy it, fill in the hosts, and read
 
 ## Where to read next
 
+- [`docs/SETUP.md`](docs/SETUP.md) — setting up a machine from scratch:
+  installing prerequisites, getting model files onto disk, the one-script
+  HTTPS/LiveKit/Caddy bootstrap, and a detailed cheat sheet for swapping ASR/TTS
+  engines (voices, custom reference voices, vLLM-hosted alternatives).
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — the runbook: ports, start and
   stop order, certificates, moving to another machine, debug flags, and the
   troubleshooting entries for every failure this stack has actually produced.

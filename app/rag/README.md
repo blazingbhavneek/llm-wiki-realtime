@@ -6,8 +6,9 @@
 `self.pool`: a `ResearchBackend`. The Conductor asks it to `start(question)`,
 `get(run_id)`, `foreground_run()`, `move_to_background(run)`, `can_retry(run)` /
 `retry(run)` and `cancel_all()`; it never touches the network itself. The
-backend's runs push `ResearchProgress` / `PlanReady` / `LevelReady` /
-`ResearchFinished` / `ResearchFailed` into the inbox and decide nothing —
+backend's runs push `ResearchProgress` / `PlanReady` / `PlanRevised` /
+`LevelReady` / `ResearchFinished` / `ResearchFailed` into the inbox and decide
+nothing —
 whether a finding is spoken, and whether a failure is retried, is the
 Conductor's call.
 
@@ -62,7 +63,7 @@ One backend, so the table worth having is the endpoint's SSE vocabulary.
 |---|---|---|
 | `run` | records `run_id` as `remote_run_id`, which is what a later cancel is addressed to | `ResearchProgress` |
 | `plan` | marks the plan seen (the watchdog switches to the level budget), stores `levels`, state → `researching` | `ResearchProgress`, `PlanReady` |
-| `plan_update` | replaces `planned_levels` **only if `version` is higher**; a stale re-broadcast is ignored | `ResearchProgress` |
+| `plan_update` | replaces `planned_levels` **only if `version` is higher**; a stale re-broadcast is ignored | `ResearchProgress`, `PlanRevised` — only when the revision was accepted |
 | `level_start` | nothing but feed the watchdog — proof the backend is alive between levels | `ResearchProgress` |
 | `level` | counts one received level | `ResearchProgress`, `LevelReady` |
 | `done` | state → `done`, ends the stream | `ResearchProgress`, `ResearchFinished(status)` |
@@ -155,6 +156,15 @@ and `tests/test_providers.py` builds every registered backend offline.
   `level_start`, `level` — resets a `RAG_LEVEL_TIMEOUT_SECONDS` gap timer. A
   slow *plan* and a slow *level* are different failures and want different
   numbers; `.env` currently runs 10 s and 30 s against the placeholder.
+- **A `plan_update` is a real event, not just a screen frame.** `planned_levels`
+  on the run is read live by the report pass, but `Memory` keeps its own copy of
+  what the run still owes — that is what answers "we are already looking into
+  that" instead of opening a second run. For a while the revision only reached
+  the screen, so that answer was given off a plan the backend had already
+  replaced. `PlanRevised` carries it into `Memory`, and only when the run
+  accepted the revision, so a stale re-broadcast cannot resurrect a dropped
+  objective. It is deliberately **not** a second `PlanReady`: the first plan is
+  announced out loud, a revision never is.
 - **`LLM_WIKI_REALTIME_URL` overrides the stream URL only.** Cancel is still
   built from `LLM_WIKI_BASE_URL` / `_PREFIX` / `_DATABASE`. Point the override
   at a different host and stops go to the old one, silently.

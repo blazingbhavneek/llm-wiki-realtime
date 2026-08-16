@@ -23,6 +23,7 @@ from app.core.events import (
     LevelReady,
     ListenButtonChanged,
     PlanReady,
+    PlanRevised,
     ResearchFailed,
     ResearchFinished,
     ResearchProgress,
@@ -149,6 +150,16 @@ class Conductor:
                 self.pending.append(
                     Pending("prompt", prompts.plan_preview_instructions(run.question, event.planned_levels))
                 )
+            return
+
+        if isinstance(event, PlanRevised):
+            run = self.pool.get(event.run_id)
+            if run is not None:
+                # Same bookkeeping, no second announcement. Without this the
+                # pending set answers follow-ups off the plan the backend has
+                # already replaced -- promising an objective that was dropped,
+                # or re-researching one that was added.
+                self.memory.note_plan(run, event.planned_levels)
             return
 
         if isinstance(event, LevelReady):
@@ -321,6 +332,9 @@ class Conductor:
     def report(self, level: LevelResult, *, resume: bool = False, attribute: bool = False) -> None:
         step, step_count, next_objective = self.position_of(level)
         spoken_so_far = self.memory.spoken_for(level.run_id, exclude=level)
+        # Quoted back separately from `spoken_so_far`, which carries it only as
+        # content not to repeat -- and a hand-off line is not content.
+        last_closing_line = self.memory.last_closing_line(level.run_id, exclude=level)
         # The answer to a question is never optional, so the skip door only opens
         # once this question has been answered at all. A resume owes the rest of
         # a sentence, and `forced` is an explicit ask; neither may go silent.
@@ -335,6 +349,7 @@ class Conductor:
             attribute=attribute,
             spoken_so_far=spoken_so_far,
             may_skip=may_skip,
+            last_closing_line=last_closing_line,
         )
         self.memory.mark_reporting(level)
         speech_id = self.speaker.start_report(prompt)
@@ -344,7 +359,14 @@ class Conductor:
         """Where this level sits in its run's plan, for the 'and next we look at' line."""
         run = self.pool.get(level.run_id)
         planned = sorted(
-            (run.planned_levels if run else []),
+            (
+                item
+                for item in (run.planned_levels if run else [])
+                # A skipped stage is not the next thing we will say. Left in, it
+                # becomes this level's `next_objective` and the report hands off
+                # to a stage the backend has already dropped.
+                if str(item.get("status") or "") != "skipped"
+            ),
             key=lambda item: int(item.get("position") or 0),
         )
         index = next(

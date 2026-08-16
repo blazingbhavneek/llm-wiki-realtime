@@ -106,17 +106,77 @@ def plan_preview_instructions(question: str, planned_levels: list[dict[str, Any]
             sorted(planned_levels, key=lambda level: int(level.get("position") or 0))
         )
     )
+    # A plan of one stage is the backend saying it expects to be done in one
+    # answer. Told to preview "what comes first and what comes next", the model
+    # invents a second step to fill the slot -- 「定義を探して、そのあと引数の
+    # 意味を確認します」 for a run that then answers and stops. Only a plan that
+    # really has a next stage may promise one.
+    if len(planned_levels) <= 1:
+        shape = (
+            "これから何を調べるのかだけを、自然な日本語一文で短く伝えてください。"
+            "手順を分けて説明しないでください。"
+            "『まず』『そのあと』『続いて』『次に』のように、"
+            "このあとに別の段階が続くと受け取れる言い方は使わないでください。"
+            "調査がこれで終わりだと明言する必要もありません。"
+        )
+    else:
+        shape = (
+            "ユーザーに、これから何を確認し、どの順で説明するかを自然な日本語一文で"
+            "予告してください。内部の観点をそのまま列挙せず、"
+            "例えば『まず関数の役割を確認し、そのあと引数の意味を見ます』のように"
+            "会話として言い換えてください。"
+            # This sentence is spoken once and never corrected, while the plan
+            # below it is provisional: the backend appends stages mid-run. A
+            # preview that closes the list is what makes a later third stage
+            # sound like a detour instead of the rest of the answer.
+            "この段階計画は調査の途中で増えたり分かれたりします。"
+            "段階の数を言ったり、『この二点だけ』『以上の流れで説明します』のように"
+            "これで全部だと受け取れる言い方をしたりしないでください。"
+            "計画を最後まで言い切る必要はなく、"
+            "まず何から確認し、次に何を見るかまで伝えれば十分です。"
+        )
     return (
-        "以下は社内ウィキ調査の内部的な段階計画です。ユーザーに、これから何を確認し、"
-        "どの順で説明するかを自然な日本語一文で予告してください。"
-        "検索語、件数、段階番号、箇条書き、計画という言葉、Markdown、英字、ローマ字、"
-        "アンダースコア、ハイフンは出力しません。内部の観点をそのまま列挙せず、"
-        "例えば『まず関数の役割を確認し、そのあと引数の意味を見ます』のように"
-        "会話として言い換えてください。まだ事実の回答や推測はしないでください。"
+        "以下は社内ウィキ調査の内部的な段階計画です。"
+        + shape
+        + "検索語、件数、段階番号、箇条書き、計画という言葉、Markdown、英字、ローマ字、"
+        "アンダースコア、ハイフンは出力しません。"
+        "まだ事実の回答や推測はしないでください。"
         "追加の調査やツール呼び出しはしないでください。\n\n"
         f"[ユーザーの質問]\n{question}\n\n"
         f"[内部の段階計画]\n{outline}"
     )
+
+
+def _bridge_rules(*, step: int, step_count: int, next_objective: str, last_closing_line: str) -> str:
+    """The one sentence that hands off to the next stage.
+
+    It is derived from the next objective alone, which is why a mid-run plan
+    split breaks it: the stage that got split promised the whole of what it was
+    about to say, then the half that survived the split promised it again, word
+    for word, and the user hears two steps of no progress. Two signals fix that
+    without a second speech turn - whether anything follows the next objective
+    (so the hand-off stops sounding like the end), and what the previous
+    hand-off actually said (so this one has to differ, or stand down).
+    """
+    if not next_objective:
+        return "最後の段階では次の調査を予告せず、質問への答えを短く締めてください。"
+    rules = (
+        "内容を言い終えた後に、一度だけ自然に"
+        "『続けて、引数の意味を確認します』のように次の話題へつないでください。"
+    )
+    if step + 1 < step_count:
+        rules += (
+            "次の観点のあとにも段階が残っています。そこで説明が終わるような締め方はせず、"
+            "まだ続きがあると分かる言い方にしてください。"
+        )
+    if last_closing_line:
+        rules += (
+            "ただし直前の段階は『直前の締めの一文』で締めています。"
+            "同じ文や、言い換えただけのほぼ同じ一文で締めてはいけません。"
+            "次の観点が直前に予告した内容と実質同じで、違う締め方ができない場合は、"
+            "次の話題へつなぐ一文自体を省き、この段階の答えだけで締めてください。"
+        )
+    return rules
 
 
 def report_instructions(
@@ -129,12 +189,16 @@ def report_instructions(
     attribute: bool = False,
     spoken_so_far: str = "",
     may_skip: bool = False,
+    last_closing_line: str = "",
 ) -> str:
     """One level of evidence, spoken as two to four sentences - or as nothing.
 
     ``may_skip`` lets this same pass decide the level is not worth saying. The
     decision has to live here because an empty generation is the only way to
     reach that verdict without any of it having been voiced first.
+
+    ``last_closing_line`` is how the hand-off at the end stays honest across a
+    plan that changed under it; see ``_bridge_rules``.
     """
     lead = ""
     if attribute:
@@ -180,14 +244,18 @@ def report_instructions(
         + "名称を示した後は、技術的な生データの羅列を避け、何をするものかを説明してください。"
         "これは単独の回答ではなく、段階的な説明の途中です。前の段階の内容を繰り返さず、"
         "この段階で新たに分かったことだけを話してください。"
-        "次の観点が示されている場合は、内容を言い終えた後に一度だけ自然に"
-        "『続けて、引数の意味を確認します』のように次の話題へつないでください。"
-        "最後の段階では次の調査を予告せず、質問への答えを短く締めてください。"
-        "未確定の内容は断定せず、追加の調査やツール呼び出しはしないでください。\n\n"
+        + _bridge_rules(
+            step=step,
+            step_count=step_count,
+            next_objective=next_objective,
+            last_closing_line=last_closing_line,
+        )
+        + "未確定の内容は断定せず、追加の調査やツール呼び出しはしないでください。\n\n"
         f"[ユーザーの質問]\n{level.question}\n\n"
         f"[説明の段階]\n{step} / {step_count}\n\n"
         f"[この段階の観点]\n{level.objective}\n\n"
         f"[次の観点]\n{next_objective or 'なし。ここで説明を締める。'}\n\n"
+        + (f"[直前の締めの一文]\n{last_closing_line}\n\n" if next_objective and last_closing_line else "")
         + (f"[この質問についてすでに話した内容]\n{spoken_so_far}\n\n" if spoken_so_far else "")
         + f"[内部結果]\n{level.text[:5000]}"
     )
