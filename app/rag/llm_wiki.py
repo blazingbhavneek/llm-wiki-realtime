@@ -36,7 +36,11 @@ CANCELLED = "cancelled"
 # half the retrieval the backend offers; `max_queries_per_level: 4` was never
 # reachable inside a 12s stage budget, so queries 3 and 4 were cut every time.
 VOICE_KNOBS: dict[str, int] = {
-    "max_levels": 3,
+    # Mode A: 1 = fast answer only. The deep and anticipation stages are what
+    # produced the 「続けて…」 rant; asking for them is what started it.
+    # Restore `3` to bring them back.
+    "max_levels": 1,
+    # "max_levels": 3,
     "max_queries_per_level": 2,
     "search_limit": 16,
     "max_context_chars": 32_000,

@@ -462,6 +462,25 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         # the dropped stage is never offered as the thing coming next
         self.assertNotIn("資料の続きを読み詳細を補う", prompt)
 
+    async def test_a_single_stage_plan_closes_short_with_no_hand_off(self):
+        # Mode A: VOICE_KNOBS["max_levels"] = 1 means the backend's plan frame
+        # carries exactly one stage and no plan_update ever follows, so
+        # run.planned_levels never grows past length 1. position_of then hands
+        # the report next_objective="", and _bridge_rules must take its
+        # "close it short" branch instead of promising a 続けて hand-off into
+        # a stage that is never coming.
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("mpf_buf とは")
+        run.planned_levels = [{"id": "l1", "objective": "役割の確認", "position": 1}]
+        memory.remember(run, level_event("l1", "役割の答え", 1, "役割の確認"))
+        await feed(conductor, IdleTick())
+
+        prompt = speaker.started[-1][1]
+        self.assertEqual(prompt.count("[説明の段階]\n1 / 1"), 1)
+        self.assertIn("最後の段階では次の調査を予告せず", prompt)
+        self.assertNotIn("続けて、引数の意味を確認します", prompt)
+
     @unittest.skip("plan preview removed; see pre_branch_plan.md P2a")
     async def test_a_one_stage_plan_is_previewed_without_promising_a_next_step(self):
         # The backend plans one stage when it expects to answer in one. Told to
