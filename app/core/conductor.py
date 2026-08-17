@@ -333,6 +333,12 @@ class Conductor:
             self.pending.append(Pending("notice", prompts.NOTICE_ACKNOWLEDGED))
             return
 
+        # Mode B: the offer stands for exactly one turn. Anything that is not an
+        # acceptance lets it lapse -- a paraphrased 「もっと詳しく」 is answered here,
+        # through read_result, without ever reaching accept_offer, and an offer
+        # left standing means a later unrelated 「はい」 narrates the deep level a
+        # second time.
+        self.offered_run_id = None
         self.speaker.start_reply(turn.text, context=self.memory.summary_for_llm())
 
     def start_research(self, question: str) -> None:

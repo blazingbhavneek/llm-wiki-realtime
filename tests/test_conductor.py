@@ -608,6 +608,32 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(speaker.started[-1], ("reply", "はい"))
         self.assertNotIn(("notice", prompts.NOTICE_NOTHING_TO_CONTINUE), speaker.started)
 
+    async def test_an_offer_answered_through_read_result_does_not_stay_standing(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("A")
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "浅い答え", 1, "浅い確認")))
+        await feed(conductor, speaker.finish("浅い答えはこうです。"))
+        await feed(conductor, LevelReady(run.run_id, level_event("l2", "深い答え", 2, "深い確認")))
+        deep = memory.levels[-1]
+        await feed(conductor, ResearchFinished(run.run_id, "complete"))
+        await feed(conductor, speaker.finish())  # the offer finishes speaking
+
+        # A paraphrase the regex does not catch: it reaches the LLM, which
+        # answers it through read_result. The offer was taken up, just not by
+        # accept_offer, so it must not remain standing.
+        await feed(conductor, ListenButtonChanged(True))
+        await feed(conductor, UserSaidText("もっと詳しく教えてください"))
+        self.assertEqual(speaker.started[-1][0], "reply")
+        self.assertIsNone(conductor.offered_run_id)
+        await feed(conductor, speaker.finish("深い答えの詳細です。"))
+
+        # ...so a later unrelated はい does not narrate the deep level again.
+        await feed(conductor, UserSaidText("はい"))
+        self.assertEqual(deep.state, SILENT)
+        self.assertNotEqual(speaker.started[-1][0], "report")
+
     async def test_a_new_question_while_an_offer_stands_is_answered_not_swallowed(self):
         conductor = build()
         speaker, memory = conductor.speaker, conductor.memory
@@ -628,7 +654,9 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         # never answer what was asked.
         self.assertEqual(speaker.started[-1], ("reply", "教えて、mpf_mfs_open の引数"))
         self.assertEqual(deep.state, SILENT)
-        self.assertEqual(conductor.offered_run_id, run.run_id)  # offer still stands
+        # ...and the offer lapses rather than standing: the user moved on, so a
+        # later unrelated はい must not resurrect it.
+        self.assertIsNone(conductor.offered_run_id)
 
     async def test_an_empty_first_level_report_is_not_offered_back(self):
         """Edge case: the first level's own report pass can legitimately come
