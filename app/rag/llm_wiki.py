@@ -36,7 +36,10 @@ CANCELLED = "cancelled"
 # half the retrieval the backend offers; `max_queries_per_level: 4` was never
 # reachable inside a 12s stage budget, so queries 3 and 4 were cut every time.
 VOICE_KNOBS: dict[str, int] = {
-    "max_levels": 3,
+    # Mode B: 2 = fast + deep. Stage 3 (anticipation) is "look up the terms the
+    # answer used but did not explain" -- the off-topic rant, dropped outright.
+    "max_levels": 2,
+    # "max_levels": 3,
     "max_queries_per_level": 2,
     "search_limit": 16,
     "max_context_chars": 32_000,
@@ -44,6 +47,12 @@ VOICE_KNOBS: dict[str, int] = {
     # Matches the backend's overall run budget (raised 260 -> 600 while its LLM
     # endpoint is slow); a lower client-requested value overrides that budget.
     "deadline_seconds": 600,
+    # Deep stage, tightened so it lands well inside the client's 150 s
+    # RAG_LEVEL_TIMEOUT_SECONDS watchdog. Backend defaults are 4 / 5 / 30 / 120.
+    "subagent_count": 2,
+    "subagent_max_steps": 3,
+    "subagent_compile_wait_seconds": 15,
+    "deep_deadline_seconds": 45,
 }
 
 

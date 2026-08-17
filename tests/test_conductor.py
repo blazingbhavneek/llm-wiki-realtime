@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 
+from app.agent import prompts
 from app.agent.tools import NO_RETAINED_RESULT, read_retained
 from app.core.attention import DORMANT, OPEN
 from app.core.events import (
@@ -21,7 +22,7 @@ from app.core.events import (
     UserStartedSpeaking,
 )
 from app.core.conductor import Pending
-from app.core.memory import NEW, PARTIAL, REPORTED, SILENT
+from app.core.memory import NEW, PARTIAL, REPORTED, REPORTING, SILENT
 from tests.fakes import build, feed, level_event
 
 
@@ -388,6 +389,10 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         # ...and it cost no speech: a turn per plan tweak is the whole problem
         self.assertEqual(len(speaker.started), 0)
 
+    @unittest.skip(
+        "Mode B: report() blanks next_objective unconditionally (B3), so the "
+        "hand-off/step-count promise this test checks is unreachable by design."
+    )
     async def test_a_grown_plan_reaches_the_user_through_the_hand_off(self):
         conductor = build()
         speaker, memory = conductor.speaker, conductor.memory
@@ -411,6 +416,10 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         # the last stage closes instead of promising a fourth
         self.assertIn("最後の段階では次の調査を予告せず", speaker.started[-1][1])
 
+    @unittest.skip(
+        "Mode B: report() blanks next_objective unconditionally (B3), so no "
+        "hand-off sentence is ever generated for this test to compare."
+    )
     async def test_two_reports_never_hand_off_with_the_same_sentence(self):
         conductor = build()
         speaker, memory = conductor.speaker, conductor.memory
@@ -509,6 +518,154 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         await feed(conductor, LevelReady(run.run_id, level_event()))
         self.assertEqual(conductor.speaker.started, [])
         self.assertEqual(level.state, NEW)
+
+    # -- Mode B: silence every level after the first ----------------------
+
+    async def test_a_second_level_ready_on_the_same_run_lands_silent(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("A")
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "浅い答え", 1, "浅い確認")))
+        first = memory.levels[-1]
+        # `feed` already ran the ladder, so the run's first level is picked up
+        # and reporting immediately, not left NEW.
+        self.assertEqual(first.state, REPORTING)
+        await feed(conductor, speaker.finish("浅い答えはこうです。"))
+        self.assertEqual(len(speaker.started), 1)
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l2", "深い答え", 2, "深い確認")))
+        second = memory.levels[-1]
+        # Silenced the moment it arrives -- never reaches NEW, so the ladder
+        # never picks it up unprompted.
+        self.assertEqual(second.state, SILENT)
+        self.assertEqual(len(speaker.started), 1)
+        self.assertIs(memory.find("深い確認"), second)  # still readable later
+
+    async def test_research_finished_with_nothing_offerable_queues_nothing(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("A")
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "答え", 1, "確認")))
+        await feed(conductor, speaker.finish("答えはこうです。"))
+
+        await feed(conductor, ResearchFinished(run.run_id, "complete"))
+        self.assertFalse(conductor.pending)
+        self.assertIsNone(conductor.offered_run_id)
+        self.assertEqual(len(speaker.started), 1)  # just the first report
+
+    async def test_research_finished_with_a_real_silent_deep_level_offers_once(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("A")
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "浅い答え", 1, "浅い確認")))
+        await feed(conductor, speaker.finish("浅い答えはこうです。"))
+        # two deep levels arrive silently; the offer names none of them
+        # individually, so ResearchFinished must not queue one notice per level
+        await feed(conductor, LevelReady(run.run_id, level_event("l2", "深い答え1", 2, "深い確認1")))
+        await feed(conductor, LevelReady(run.run_id, level_event("l3", "深い答え2", 3, "深い確認2")))
+
+        await feed(conductor, ResearchFinished(run.run_id, "complete"))
+        notices = [item for item in speaker.started if item == ("notice", prompts.NOTICE_DEEPER_AVAILABLE)]
+        self.assertEqual(notices, [("notice", prompts.NOTICE_DEEPER_AVAILABLE)])
+        self.assertEqual(conductor.offered_run_id, run.run_id)
+
+    async def test_an_affirmative_turn_after_an_offer_promotes_the_silent_level(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("A")
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "浅い答え", 1, "浅い確認")))
+        await feed(conductor, speaker.finish("浅い答えはこうです。"))
+        await feed(conductor, LevelReady(run.run_id, level_event("l2", "深い答え", 2, "深い確認")))
+        deep = memory.levels[-1]
+
+        await feed(conductor, ResearchFinished(run.run_id, "complete"))
+        self.assertEqual(speaker.started[-1], ("notice", prompts.NOTICE_DEEPER_AVAILABLE))
+        await feed(conductor, speaker.finish())  # the offer itself finishes speaking
+
+        await feed(conductor, ListenButtonChanged(True))
+        await feed(conductor, UserSaidText("はい"))
+
+        # accept_offer promoted it back into the ladder, and speak_next picked
+        # it straight up -- REPORTING, not just NEW.
+        self.assertEqual(deep.state, REPORTING)
+        self.assertEqual(speaker.started[-1][0], "report")
+        self.assertIsNone(conductor.offered_run_id)
+
+    async def test_a_stray_affirmation_without_an_offer_falls_through_to_a_reply(self):
+        conductor = build()
+        speaker = conductor.speaker
+
+        await feed(conductor, ListenButtonChanged(True))
+        await feed(conductor, UserSaidText("はい"))
+
+        # No cut-off report and no outstanding offer: a bare はい is not a
+        # command, so it must reach the LLM as an ordinary reply rather than
+        # the canned "途中の回答はありません".
+        self.assertEqual(speaker.started[-1], ("reply", "はい"))
+        self.assertNotIn(("notice", prompts.NOTICE_NOTHING_TO_CONTINUE), speaker.started)
+
+    async def test_a_new_question_while_an_offer_stands_is_answered_not_swallowed(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("A")
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "浅い答え", 1, "浅い確認")))
+        await feed(conductor, speaker.finish("浅い答えはこうです。"))
+        await feed(conductor, LevelReady(run.run_id, level_event("l2", "深い答え", 2, "深い確認")))
+        deep = memory.levels[-1]
+        await feed(conductor, ResearchFinished(run.run_id, "complete"))
+        await feed(conductor, speaker.finish())  # the offer finishes speaking
+
+        await feed(conductor, ListenButtonChanged(True))
+        await feed(conductor, UserSaidText("教えて、mpf_mfs_open の引数"))
+
+        # A turn that merely opens with an affirmation is a new question. Read
+        # as a yes it would consume the offer, narrate the deep level, and
+        # never answer what was asked.
+        self.assertEqual(speaker.started[-1], ("reply", "教えて、mpf_mfs_open の引数"))
+        self.assertEqual(deep.state, SILENT)
+        self.assertEqual(conductor.offered_run_id, run.run_id)  # offer still stands
+
+    async def test_an_empty_first_level_report_is_not_offered_back(self):
+        """Edge case: the first level's own report pass can legitimately come
+        back empty (the ordinary "decline to speak" path -- SpeechFinished,
+        above), which marks it SILENT through the exact same state a genuine
+        deep result gets. Without excluding the run's earliest level,
+        `has_offerable`/`accept_offer` would treat the answer just declined as
+        the "deeper content" being offered back.
+        """
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("A")
+
+        await feed(conductor, LevelReady(run.run_id, level_event("l1", "浅い答え", 1, "浅い確認")))
+        first = memory.levels[-1]
+        await feed(conductor, speaker.finish(""))  # the report pass says nothing
+        self.assertEqual(first.state, SILENT)
+        # No deep level exists yet -- the only SILENT level is the declined
+        # first one, which must never be what has_offerable keys the offer on.
+        self.assertFalse(conductor.has_offerable(run.run_id))
+
+        # A genuine deep level then arrives and goes silent too, via B2 this time.
+        await feed(conductor, LevelReady(run.run_id, level_event("l2", "深い答え", 2, "深い確認")))
+        deep = memory.levels[-1]
+        self.assertEqual(deep.state, SILENT)
+        self.assertTrue(conductor.has_offerable(run.run_id))
+
+        await feed(conductor, ResearchFinished(run.run_id, "complete"))
+        self.assertEqual(speaker.started[-1], ("notice", prompts.NOTICE_DEEPER_AVAILABLE))
+
+        # Accepting the offer must promote only the genuine deep level -- not
+        # resurrect the first level's declined, empty report.
+        await feed(conductor, speaker.finish())
+        await feed(conductor, ListenButtonChanged(True))
+        await feed(conductor, UserSaidText("はい"))
+        self.assertEqual(deep.state, REPORTING)
+        self.assertEqual(first.state, SILENT)
 
 
 class PlanFrameTests(unittest.IsolatedAsyncioTestCase):

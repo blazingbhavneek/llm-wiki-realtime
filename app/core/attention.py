@@ -24,6 +24,16 @@ OPEN = "open"
 _STOP = re.compile(r"(やめて|止めて|停止|ストップ|キャンセル|もういい|やっぱりいい)")
 _REPEAT = re.compile(r"(もう一回|もう一度|繰り返|さっきの.*(?:何|言って))")
 _CONTINUE = re.compile(r"(続き|続けて|その先)")
+# Mode B: an answer to "お聴きになりますか？". The *whole* turn has to be the
+# affirmation. Merely starting with one is not enough: 「ええと、mpf_buf とは？」
+# opens with ええ and 「教えて、戻り値は？」 opens with 教えて, and accepting either as a
+# yes makes the Conductor read the deep result back and drop the question that
+# was actually asked. Anything phrased outside this still reaches the LLM,
+# which can read the retained result through read_result.
+_AFFIRM = re.compile(
+    r"^(?:(?:はい|うん|ええ|お願いします|お願い|おねがいします|おねがい"
+    r"|聞きたい|教えて|知りたい)[、。．！？!?\s]*)+$"
+)
 _CLOSE = re.compile(r"^(ありがとう|ありがと|どうも|終了|さようなら|おわり|終わり)")
 
 
@@ -92,7 +102,7 @@ class Attention:
             return "close"
         if _STOP.search(text):
             return "stop"
-        if _CONTINUE.search(text):
+        if _CONTINUE.search(text) or _AFFIRM.match(text):
             return "continue"
         if _REPEAT.search(text):
             return "repeat"

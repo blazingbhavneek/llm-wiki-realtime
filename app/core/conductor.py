@@ -35,7 +35,7 @@ from app.core.events import (
     UserStartedSpeaking,
     UserStoppedSpeaking,
 )
-from app.core.memory import NEW, PARTIAL, LevelResult, Memory
+from app.core.memory import NEW, PARTIAL, SILENT, LevelResult, Memory
 from app.core.screen import Screen
 from app.core.speaker import Speaker
 
@@ -102,6 +102,9 @@ class Conductor:
         self.speaking_level: dict[str, LevelResult] = {}
         self.stopped_runs: set[str] = set()
         self._published_attention = ""
+        # Mode B: the run whose deep results were just offered, waiting on a
+        # yes. None once accepted, declined by moving on, or never offered.
+        self.offered_run_id: str | None = None
 
     # -- the loop ----------------------------------------------------------
 
@@ -200,7 +203,12 @@ class Conductor:
         if isinstance(event, LevelReady):
             run = self.pool.get(event.run_id)
             if run is not None:
-                self.memory.remember(run, event.level)
+                level = self.memory.remember(run, event.level)
+                # Mode B: only the first level of a run is spoken. Everything
+                # after it is retained (read_result still finds it) and offered
+                # once at the end instead of narrated unprompted.
+                if level is not None and self.first_level_done(run.run_id):
+                    self.memory.mark_silent(level)
             return
 
         if isinstance(event, ResearchFailed):
@@ -230,6 +238,15 @@ class Conductor:
             # itself, but whatever the plan promised and never sent is not
             # coming: stop telling follow-ups to wait for it.
             self.memory.close_plan(event.run_id)
+            # Mode B: the deep stage ran silently. Offer it only if it actually
+            # holds something -- an empty or boilerplate deep level says nothing,
+            # so we say nothing.
+            run = self.pool.get(event.run_id)
+            if run is not None and run.focus == FOREGROUND and self.has_offerable(event.run_id):
+                self.offered_run_id = event.run_id
+                self.pending.append(
+                    Pending("notice", prompts.NOTICE_DEEPER_AVAILABLE, event.run_id)
+                )
             return
 
         if isinstance(event, SpeechFinished):
@@ -298,8 +315,18 @@ class Conductor:
 
         if turn.command == "continue":
             level = self.memory.last_partial()
-            if level is None:
+            if level is not None:
+                return  # the ladder resumes it, as before
+            # Mode B: no cut-off report, but a deep result was offered -- this
+            # is the user accepting it. Promote it back into the speech ladder.
+            if self.accept_offer():
+                return
+            # Neither: fall through to a normal reply instead of a canned
+            # "nothing to continue", which is the wrong answer to a stray はい.
+            if not turn.text:
                 self.pending.append(Pending("notice", prompts.NOTICE_NOTHING_TO_CONTINUE))
+                return
+            self.speaker.start_reply(turn.text, context=self.memory.summary_for_llm())
             return
 
         if not turn.text:
@@ -309,6 +336,9 @@ class Conductor:
         self.speaker.start_reply(turn.text, context=self.memory.summary_for_llm())
 
     def start_research(self, question: str) -> None:
+        # Mode B: a stale offer from the previous question must never be
+        # accepted once a new one has started.
+        self.offered_run_id = None
         current = self.pool.foreground_run()
         if current is not None:
             self.pool.move_to_background(current)
@@ -327,6 +357,8 @@ class Conductor:
         self.pending.append(Pending("notice", prompts.NOTICE_RESEARCHING, run.run_id))
 
     async def stop_everything(self) -> None:
+        # Mode B: stopping ends any outstanding offer too.
+        self.offered_run_id = None
         for run in self.pool.runs.values():
             self.stopped_runs.add(run.run_id)
             self.memory.close_plan(run.run_id)
@@ -336,6 +368,19 @@ class Conductor:
                 self.memory.mark_silent(level)
         self.pending.clear()
         self.pending.append(Pending("notice", prompts.NOTICE_STOPPED))
+
+    def accept_offer(self) -> bool:
+        """Un-silence the deep levels the user just asked for. Mode B."""
+        run_id, self.offered_run_id = self.offered_run_id, None
+        if run_id is None:
+            return False
+        promoted = False
+        for level in self._deep_levels(run_id):
+            if level.state == SILENT and level.text.strip():
+                level.forced = True  # asked for out loud, so the report pass may not skip it
+                self.memory.mark_new(level)
+                promoted = True
+        return promoted
 
     def interrupt_current(self) -> None:
         self.speaker.interrupt()
@@ -386,7 +431,12 @@ class Conductor:
         # unprompted.
 
     def report(self, level: LevelResult, *, resume: bool = False, attribute: bool = False) -> None:
-        step, step_count, next_objective = self.position_of(level)
+        step, step_count, _next_objective = self.position_of(level)
+        # Mode B: the deep stage is silent, so nothing may be promised out loud.
+        # Blanking these puts _bridge_rules on its "close it short" branch and
+        # stops "[説明の段階] 1 / 2" from implying a part two.
+        next_objective = ""
+        step_count = step
         spoken_so_far = self.memory.spoken_for(level.run_id, exclude=level)
         # Do not spend an LLM/TTS turn on the backend's no-result boilerplate
         # once this question already has an answer.  Keep the level in Memory
@@ -445,6 +495,34 @@ class Conductor:
         if index + 1 < len(planned):
             next_objective = str(planned[index + 1].get("objective") or "")
         return index + 1, step_count, next_objective
+
+    def first_level_done(self, run_id: str) -> bool:
+        """True once this run has already produced a level before this one."""
+        return sum(1 for level in self.memory.levels if level.run_id == run_id) > 1
+
+    def _deep_levels(self, run_id: str) -> list[LevelResult]:
+        """This run's levels after the first -- the ones Mode B keeps silent.
+
+        The first level is the shallow answer, spoken up front. If its own
+        report pass came back empty it is marked SILENT too, but through the
+        ordinary SpeechFinished path (`handle`, above) that means "declined",
+        not "held back as deeper research". Excluding it here is what stops
+        `has_offerable`/`accept_offer` from treating a declined shallow answer
+        as the deep result they exist to manage.
+        """
+        levels = [level for level in self.memory.levels if level.run_id == run_id]
+        if not levels:
+            return []
+        earliest = min(level.serial for level in levels)
+        return [level for level in levels if level.serial != earliest]
+
+    def has_offerable(self, run_id: str) -> bool:
+        return any(
+            level.state == SILENT
+            and level.text.strip()
+            and not _is_no_information_result(level.text)
+            for level in self._deep_levels(run_id)
+        )
 
     # -- bootstrap ---------------------------------------------------------
 

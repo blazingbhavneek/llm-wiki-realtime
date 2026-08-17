@@ -25,6 +25,9 @@ NOTICE_NOTHING_TO_CONTINUE = "途中の回答はありません。"
 NOTICE_CLOSED = "わかりました。"
 NOTICE_ACKNOWLEDGED = "はい、どうぞ。"
 NOTICE_RESEARCH_FAILED = "調査との接続が切れました。届いている内容はそのまま確認できます。"
+# Mode B: the deep stage ran silently; this is the one question asked about it,
+# only when there turned out to be something worth reading back.
+NOTICE_DEEPER_AVAILABLE = "さらに詳しい内容も調べてあります。お聴きになりますか？"
 
 _SHARED_VOICE_RULES = (
     "出力は日本語だけにしてください。英字、英単語、ローマ字、ASCIIの記号、Markdown、"

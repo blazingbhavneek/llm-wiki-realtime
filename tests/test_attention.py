@@ -56,6 +56,22 @@ class AttentionTests(unittest.TestCase):
         self.assertEqual(classify("ありがとう"), "close")
         self.assertEqual(classify("mpf_buf は？"), "none")
 
+    def test_mode_b_affirmations_answer_the_deeper_research_offer(self):
+        classify = Attention.classify
+        self.assertEqual(classify("はい"), "continue")
+        self.assertEqual(classify("うん"), "continue")
+        self.assertEqual(classify("お願いします"), "continue")
+        self.assertEqual(classify("はい、お願いします"), "continue")
+        # anchored: はい appearing mid-sentence is not an answer to "お聴きに
+        # なりますか？" and must not be swallowed as one
+        self.assertEqual(classify("それはいいですね"), "none")
+        # ...and neither is a new question that merely opens with one. Taken as
+        # a yes, the Conductor reads the deep result back and this question is
+        # never answered at all.
+        self.assertEqual(classify("ええと、mpf_buf とは何ですか"), "none")
+        self.assertEqual(classify("教えて、mpf_mfs_open の引数"), "none")
+        self.assertEqual(classify("知りたいのは戻り値です"), "none")
+
 
 if __name__ == "__main__":
     unittest.main()
