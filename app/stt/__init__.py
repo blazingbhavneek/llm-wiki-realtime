@@ -23,6 +23,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # name is known.
 REGISTRY: dict[str, str] = {
     "nemotron": "app.stt.nemotron:NemotronProvider",
+    "qwen": "app.stt.qwen:QwenProvider",
     "voxtral": "app.stt.voxtral:VoxtralProvider",
 }
 

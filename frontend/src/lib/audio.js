@@ -8,6 +8,14 @@
 
 export const BAND_COUNT = 32
 
+// These thresholds are deliberately above ordinary headphone-mic room tone.
+// Opening needs two consecutive animation frames so a keyboard tick cannot
+// trigger a turn; closing is delayed so normal gaps between words stay intact.
+const VOICE_GATE_OPEN_RMS = 0.035
+const VOICE_GATE_CLOSE_RMS = 0.022
+const VOICE_GATE_ATTACK_FRAMES = 2
+const VOICE_GATE_RELEASE_FRAMES = 18
+
 export class AudioBus {
   constructor() {
     this.ctx = null
@@ -16,6 +24,7 @@ export class AudioBus {
     this.userLevel = 0
     this.agentLevel = 0
     this.devLoopback = null
+    this.voiceGate = null
   }
 
   _ctx() {
@@ -31,7 +40,7 @@ export class AudioBus {
   // key is 'mic' or 'agent'. Passing the same key twice replaces the old tap.
   attach(key, mediaStreamTrack) {
     const ctx = this._ctx()
-    if (!ctx || !mediaStreamTrack) return
+    if (!ctx || !mediaStreamTrack) return false
     this.detach(key)
     try {
       const stream = new MediaStream([mediaStreamTrack])
@@ -46,16 +55,87 @@ export class AudioBus {
         data: new Uint8Array(analyser.frequencyBinCount),
         waveform: new Uint8Array(analyser.fftSize),
       })
+      return true
     } catch {
       // A track that ended between subscribe and attach throws here. Ignore.
+      return false
     }
   }
 
-  detach(key) {
+  detach(key, { restoreVoiceGate = true } = {}) {
+    if (key === 'mic') this.disableVoiceGate({ restoreTrack: restoreVoiceGate })
+    this._detach(key)
+  }
+
+  _detach(key) {
     const source = this.sources.get(key)
     if (!source) return
     try { source.node.disconnect() } catch { /* already gone */ }
     this.sources.delete(key)
+  }
+
+  // Send silence to LiveKit until the microphone has crossed a speech-level
+  // threshold. The analyser uses a clone: disabling the published track would
+  // otherwise also silence the signal used to decide when to reopen the gate.
+  enableVoiceGate(mediaStreamTrack) {
+    if (!mediaStreamTrack?.clone) return false
+    this.disableVoiceGate()
+    try {
+      const analysisTrack = mediaStreamTrack.clone()
+      if (!this.attach('mic', analysisTrack)) {
+        analysisTrack.stop()
+        return false
+      }
+      mediaStreamTrack.enabled = false
+      this.voiceGate = {
+        track: mediaStreamTrack,
+        analysisTrack,
+        open: false,
+        aboveFrames: 0,
+        belowFrames: 0,
+      }
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  disableVoiceGate({ restoreTrack = true } = {}) {
+    const gate = this.voiceGate
+    if (!gate) return
+    this.voiceGate = null
+    this._detach('mic')
+    try { gate.analysisTrack.stop() } catch { /* already ended */ }
+    if (restoreTrack) {
+      try { gate.track.enabled = true } catch { /* already ended */ }
+    }
+  }
+
+  _updateVoiceGate(rms) {
+    const gate = this.voiceGate
+    if (!gate || gate.track.readyState !== 'live') return
+
+    // Once open, use a lower close threshold so a voice does not chatter the
+    // gate around a single boundary while syllables naturally soften.
+    const aboveThreshold = gate.open
+      ? rms >= VOICE_GATE_CLOSE_RMS
+      : rms >= VOICE_GATE_OPEN_RMS
+    if (aboveThreshold) {
+      gate.aboveFrames += 1
+      gate.belowFrames = 0
+      if (!gate.open && gate.aboveFrames >= VOICE_GATE_ATTACK_FRAMES) {
+        gate.open = true
+        gate.track.enabled = true
+      }
+      return
+    }
+
+    gate.aboveFrames = 0
+    gate.belowFrames += 1
+    if (gate.open && gate.belowFrames >= VOICE_GATE_RELEASE_FRAMES) {
+      gate.open = false
+      gate.track.enabled = false
+    }
   }
 
   // Development-only loopback. The delayed stream is sent both to the local
@@ -102,6 +182,7 @@ export class AudioBus {
 
   close() {
     this.stopDevLoopback()
+    this.disableVoiceGate({ restoreTrack: false })
     for (const key of [...this.sources.keys()]) this.detach(key)
     this.ctx?.close().catch(() => {})
     this.ctx = null
@@ -113,6 +194,7 @@ export class AudioBus {
     this.bands.fill(0)
     let user = 0
     let agent = 0
+    let micRms = 0
 
     for (const [key, source] of this.sources) {
       const { analyser, data, waveform } = source
@@ -129,6 +211,7 @@ export class AudioBus {
         squareSum += sample * sample
       }
       const rms = Math.sqrt(squareSum / waveform.length)
+      if (key === 'mic') micRms = rms
       const level = Math.min(1, Math.max(0, (rms - 0.012) * 7.5))
       if (key === 'mic') user = level
       else agent = Math.max(agent, level)
@@ -143,6 +226,7 @@ export class AudioBus {
       }
     }
 
+    this._updateVoiceGate(micRms)
     this.userLevel = user
     this.agentLevel = agent
     return this

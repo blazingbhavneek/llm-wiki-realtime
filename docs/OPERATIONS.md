@@ -192,7 +192,7 @@ the code: `app/stt/README.md`, `app/tts/README.md`, `app/llm/README.md`,
 `app/rag/README.md`.
 
 ```
-  STT_PROVIDER    nemotron | voxtral            (default nemotron)
+  STT_PROVIDER    nemotron | qwen | voxtral     (default nemotron)
   TTS_PROVIDER    supertonic | qwen3            (default supertonic)
   LLM_PROVIDER    openai_compatible             (default openai_compatible)
   RAG_PROVIDER    llm_wiki                      (default llm_wiki)
@@ -286,6 +286,8 @@ Two servers on one port
   NEMO_STT_DEBUG=1           STT trace: WebSocket connect, session config,
                                audio flow, VAD start/end, commits, finals
   VAD_MIN_SILENCE_SECONDS    trailing silence before a turn is considered
+  VAD_ACTIVATION_THRESHOLD   speech confidence needed to start a turn; 0.70
+                             filters distant voices and room noise
                                over (default 0.55). Lower = snappier but cuts
                                people off mid-sentence; higher = feels slow.
                                It is the biggest controllable part of the

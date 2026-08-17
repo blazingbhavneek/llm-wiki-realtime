@@ -42,6 +42,7 @@ def prewarm(proc: agents.JobProcess) -> None:
     # feels slow. Silero's own default is 0.55s.
     proc.userdata["vad"] = silero.VAD.load(
         min_silence_duration=Settings.from_env().tuning.vad_min_silence_seconds,
+        activation_threshold=Settings.from_env().tuning.vad_activation_threshold,
     )
     dbg("PREWARM_DONE")
 

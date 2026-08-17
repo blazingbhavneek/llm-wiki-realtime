@@ -15,7 +15,7 @@ model ourselves the provider also owns the server: `serve()`, reachable as
 
 ## 2. Choosing one
 
-`STT_PROVIDER` — `nemotron` (default) or `voxtral`.
+`STT_PROVIDER` — `nemotron` (default), `voxtral`, or `qwen`.
 
 Everything else is shared, and each variable falls back to the selected
 provider's class defaults:
@@ -39,6 +39,7 @@ Nemotron's own server reads three more: `ASR_MODEL_PATH`, `ASR_SERVER_HOST`,
 | name | hosted by | endpoint | sample rate | streaming / interim | VAD required | what pins the language |
 |---|---|---|---|---|---|---|
 | `nemotron` | self — NeMo-Speech.cpp binary, CPU | `http://127.0.0.1:8003/v1` (`/realtime` WS + `/audio/transcriptions`) | 16 kHz, the model's native rate | yes / yes | **yes** — commits on VAD end-of-speech | `STT_LANGUAGE`, as an exact locale (`ja-JP`) |
+| `qwen` | vLLM — Qwen3-ASR | `http://10.160.144.101:51027/v1` | 16 kHz | no / no — batch per VAD turn | **yes** — LiveKit segments on VAD | always `ja`; `STT_LANGUAGE` is deliberately ignored |
 | `voxtral` | vLLM | `http://127.0.0.1:8001/v1` | 16 kHz (plugin's realtime path sends 24 kHz PCM) | only if `STT_USE_REALTIME=true` | yes in batch mode (LiveKit's `StreamAdapter` segments) | `STT_LANGUAGE`, base tag only — the plugin truncates a locale, and its default is `en` |
 
 `finals_are_utterances` is True for `nemotron` and for `voxtral` in batch mode;

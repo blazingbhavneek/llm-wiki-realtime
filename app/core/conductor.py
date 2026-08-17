@@ -8,7 +8,7 @@ itself never awaits playout, generation, or the network.
 from __future__ import annotations
 
 import asyncio
-import os
+import re
 from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -42,19 +42,41 @@ from app.core.speaker import Speaker
 if TYPE_CHECKING:
     from app.rag.base import ResearchBackend
 
-# How many reports may pass before a background finding stops being worth
-# saying. Deliberately dumb: a slightly over-talkative coworker is a much
-# smaller problem than one that silently drops findings.
-BACKGROUND_STALE_AFTER_REPORTS = int(os.getenv("BACKGROUND_STALE_AFTER_REPORTS", "3"))
+# A level can be present and readable for follow-ups while still having
+# nothing useful to add to the answer.  These are deliberately narrow,
+# complete-result matches: a sentence that contains a no-result phrase and
+# then continues with evidence must still reach the report pass.
+_NO_INFORMATION_PATTERNS = (
+    re.compile(
+        r"^(?:この[^。！？!?]{0,40}(?:では|には|については))?"
+        r"(?:具体的な|新しい|追加の|該当する)?情報(?:は|が)"
+        r"(?:見つかりません(?:でした)?|ありません(?:でした)?|"
+        r"確認できません(?:でした)?|得られません(?:でした)?)"
+        r"[。．.!！?？]*$"
+    ),
+    re.compile(
+        r"^(?:特に|追加の|新しい)?(?:情報|内容)?(?:は|が)?"
+        r"ありません(?:でした)?[。．.!！?？]*$"
+    ),
+)
+
+
+def _is_no_information_result(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", (text or "").strip())
+    return bool(normalized) and any(
+        pattern.fullmatch(normalized) for pattern in _NO_INFORMATION_PATTERNS
+    )
 
 
 @dataclass
 class Pending:
     """Speech waiting for the slot. `notice` is spoken verbatim, `prompt` is an
-    LLM pass over evidence."""
+    LLM pass over evidence. Research-owned items are only valid while their
+    run remains the foreground run."""
 
     kind: str  # "notice" | "prompt"
     text: str
+    run_id: str | None = None
 
 
 class Conductor:
@@ -136,7 +158,12 @@ class Conductor:
             return
 
         if isinstance(event, ResearchProgress):
-            self.screen.publish_research(event.frame)
+            # The panel represents the question currently being researched.
+            # Background runs are still retained for an explicit follow-up, but
+            # their late SSE frames must not replace the newest run's status.
+            run = self.pool.get(event.run_id)
+            if run is not None and run.focus == FOREGROUND:
+                self.screen.publish_research(event.frame)
             return
 
         if isinstance(event, PlanReady):
@@ -148,7 +175,11 @@ class Conductor:
             self.memory.note_plan(run, event.planned_levels)
             if run.focus == FOREGROUND and event.planned_levels:
                 self.pending.append(
-                    Pending("prompt", prompts.plan_preview_instructions(run.question, event.planned_levels))
+                    Pending(
+                        "prompt",
+                        prompts.plan_preview_instructions(run.question, event.planned_levels),
+                        run.run_id,
+                    )
                 )
             return
 
@@ -174,7 +205,11 @@ class Conductor:
                 self.pool.retry(run)
                 return
             self.memory.close_plan(event.run_id)
-            self.pending.append(Pending("notice", prompts.NOTICE_RESEARCH_FAILED))
+            # A background run may still fail after a newer question begins.
+            # Its result is retained when available, but it never gets the
+            # speech floor or an unsolicited failure announcement.
+            if run is not None and run.focus == FOREGROUND:
+                self.pending.append(Pending("notice", prompts.NOTICE_RESEARCH_FAILED, run.run_id))
             return
 
         if isinstance(event, ResearchFinished):
@@ -268,9 +303,13 @@ class Conductor:
             self.memory.set_focus(current.run_id, BACKGROUND)
         run = self.pool.start(question)
         self.stopped_runs.discard(run.run_id)
+        # Reset the one-run sidebar immediately. The reducer already handles
+        # this optimistic event; waiting for a backend ``run`` frame leaves the
+        # previous question visible during the new run's initial round trip.
+        self.screen.publish_research({"type": "ask", "question": question})
         # Fixed text, no LLM round trip: fills the gap before the plan
         # preview (PlanReady, below) has anything to say.
-        self.pending.append(Pending("notice", prompts.NOTICE_RESEARCHING))
+        self.pending.append(Pending("notice", prompts.NOTICE_RESEARCHING, run.run_id))
 
     async def stop_everything(self) -> None:
         for run in self.pool.runs.values():
@@ -300,8 +339,17 @@ class Conductor:
             return  # 2. never talk over the user
 
         # 3. short, time-sensitive speech: plan previews, apologies, confirmations
-        if self.pending:
+        # A run can become background while one of its items is already queued.
+        # Drop that stale item here, at the final point before it reaches TTS.
+        while self.pending:
             item = self.pending.popleft()
+            if item.run_id is not None:
+                run = self.pool.get(item.run_id)
+                # A failed foreground run is no longer "active", but its
+                # failure notice is still the latest run's legitimate output.
+                # Ownership, not lifecycle state, is the priority boundary.
+                if run is None or run.focus != FOREGROUND or item.run_id in self.stopped_runs:
+                    continue
             if item.kind == "notice":
                 self.speaker.start_notice(item.text)
             else:
@@ -318,27 +366,27 @@ class Conductor:
         if level is not None:
             return self.report(level)
 
-        # 6. the sentence you cut me off in, about the OLD question
-        level = self.memory.next_partial(BACKGROUND)
-        if level is not None:
-            return self.report(level, resume=True, attribute=True)
-
-        # 7. new findings on the old question, only if still worth saying
-        while (level := self.memory.next_new(BACKGROUND)) is not None:
-            if self.is_still_relevant(level):
-                return self.report(level, attribute=True)
-            self.memory.mark_silent(level)
+        # Background findings remain in Memory for an explicit ``read_result``
+        # follow-up, but a newer question must never cause them to be spoken
+        # unprompted.
 
     def report(self, level: LevelResult, *, resume: bool = False, attribute: bool = False) -> None:
         step, step_count, next_objective = self.position_of(level)
         spoken_so_far = self.memory.spoken_for(level.run_id, exclude=level)
+        # Do not spend an LLM/TTS turn on the backend's no-result boilerplate
+        # once this question already has an answer.  Keep the level in Memory
+        # so a later read_result can still inspect it; SILENT only means that
+        # this particular level was not worth voicing.
+        may_skip = bool(spoken_so_far) and not resume and not level.forced
+        if may_skip and _is_no_information_result(level.text):
+            self.memory.mark_silent(level)
+            return
         # Quoted back separately from `spoken_so_far`, which carries it only as
         # content not to repeat -- and a hand-off line is not content.
         last_closing_line = self.memory.last_closing_line(level.run_id, exclude=level)
         # The answer to a question is never optional, so the skip door only opens
         # once this question has been answered at all. A resume owes the rest of
         # a sentence, and `forced` is an explicit ask; neither may go silent.
-        may_skip = bool(spoken_so_far) and not resume and not level.forced
         level.forced = False
         prompt = prompts.report_instructions(
             level,
@@ -382,15 +430,6 @@ class Conductor:
         if index + 1 < len(planned):
             next_objective = str(planned[index + 1].get("objective") or "")
         return index + 1, step_count, next_objective
-
-    def is_still_relevant(self, level: LevelResult) -> bool:
-        if level.run_id in self.stopped_runs:
-            return False
-        run = self.pool.get(level.run_id)
-        if run is None or run.superseded_at_report < 0:
-            return True
-        elapsed = self.memory.reports_delivered - run.superseded_at_report
-        return elapsed <= BACKGROUND_STALE_AFTER_REPORTS
 
     # -- bootstrap ---------------------------------------------------------
 

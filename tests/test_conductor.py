@@ -20,6 +20,7 @@ from app.core.events import (
     UserSaidText,
     UserStartedSpeaking,
 )
+from app.core.conductor import Pending
 from app.core.memory import NEW, PARTIAL, REPORTED, SILENT
 from tests.fakes import build, feed, level_event
 
@@ -59,7 +60,7 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(level.state, PARTIAL)
         self.assertEqual(level.spoken_text, "答えは")
 
-    async def test_partial_resumes_before_new_and_is_attributed(self):
+    async def test_background_partial_is_not_resumed_without_an_explicit_request(self):
         conductor = build()
         speaker, memory = conductor.speaker, conductor.memory
         run_a = conductor.pool.start("A")
@@ -81,11 +82,10 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
 
         await feed(conductor, speaker.finish())
         self.assertEqual(new.state, REPORTED)
-        self.assertIn("Aの答え", speaker.started[-1][1])
-        self.assertIn("さっきの件ですが", speaker.started[-1][1])
-        self.assertIn("続きですが", speaker.started[-1][1])
+        self.assertEqual(old.state, PARTIAL)
+        self.assertEqual(len(speaker.started), 2)
 
-    async def test_stale_background_finding_goes_silent(self):
+    async def test_background_finding_is_retained_but_not_spoken(self):
         conductor = build()
         speaker, memory = conductor.speaker, conductor.memory
         run_a = conductor.pool.start("A")
@@ -103,8 +103,9 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         stale = memory.remember(run_a, level_event("a1", "Aの遅い答え"))
         memory.set_focus(run_a.run_id, BACKGROUND)
         await feed(conductor, IdleTick())
-        self.assertEqual(stale.state, SILENT)
-        # silent is not deletion
+        self.assertEqual(stale.state, NEW)
+        self.assertEqual(len(speaker.started), 5)
+        # Not spoken is not deletion: the user can explicitly ask for it.
         self.assertIs(memory.find("Aの遅い答え"), stale)
 
     async def test_stop_does_not_depend_on_the_llm(self):
@@ -157,10 +158,43 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conductor.attention.state, DORMANT)
         self.assertFalse(conductor.attention.accept("それ詳しく").accepted)
 
-    async def test_screen_mirrors_raw_frames(self):
+    async def test_screen_mirrors_only_foreground_frames(self):
         conductor = build()
-        await feed(conductor, ResearchProgress("r1", {"type": "level_start", "level_id": "l1"}))
+        foreground = conductor.pool.start("新しい質問")
+        background = conductor.pool.start("古い質問")
+        conductor.pool.move_to_background(background)
+        await feed(conductor, ResearchProgress(background.run_id, {"type": "done"}))
+        self.assertEqual(conductor.screen.frames, [])
+        await feed(conductor, ResearchProgress(foreground.run_id, {"type": "level_start", "level_id": "l1"}))
         self.assertEqual(conductor.screen.frames[-1]["type"], "level_start")
+
+    async def test_new_research_resets_the_sidebar_to_its_question(self):
+        conductor = build()
+        conductor.start_research("最新の質問")
+        self.assertEqual(
+            conductor.screen.frames[-1],
+            {"type": "ask", "question": "最新の質問"},
+        )
+
+    async def test_queued_background_plan_preview_is_discarded(self):
+        conductor = build()
+        old = conductor.pool.start("古い質問")
+        conductor.pending.append(Pending("prompt", "古い質問の計画", old.run_id))
+        conductor.start_research("最新の質問")
+        # The latest run's notice is still valid; once it finishes, the
+        # queued old plan must be dropped instead of reaching TTS.
+        await feed(conductor, conductor.speaker.finish())
+        self.assertEqual(len(conductor.speaker.started), 1)
+        self.assertFalse(conductor.pending)
+
+    async def test_background_failure_is_not_announced(self):
+        conductor = build()
+        old = conductor.pool.start("古い質問")
+        conductor.start_research("最新の質問")
+        conductor.pending.clear()
+        old.attempts = 99
+        await feed(conductor, ResearchFailed(old.run_id, "stream_error"))
+        self.assertEqual(conductor.speaker.started, [])
 
     async def test_pressing_the_orb_off_stops_listening_even_mid_run(self):
         conductor = build()
@@ -193,6 +227,44 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(extra.state, SILENT)
         self.assertEqual(memory.reports_delivered, 1)  # nothing heard, nothing aged
         self.assertIs(memory.find("関連機能の整理"), extra)  # still readable later
+
+    async def test_a_no_information_level_is_silent_after_an_answer(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("巡回編成ファイルのレコードサイズ")
+
+        first = memory.remember(run, level_event("l1", "九十二バイトより大きくします。"))
+        await feed(conductor, IdleTick())
+        await feed(conductor, speaker.finish("九十二バイトより大きくします。"))
+
+        empty = memory.remember(
+            run,
+            level_event(
+                "l2",
+                "この領域では具体的な情報は見つかりませんでした。",
+                objective="追加の確認",
+            ),
+        )
+        await feed(conductor, IdleTick())
+
+        self.assertEqual(first.state, REPORTED)
+        self.assertEqual(empty.state, SILENT)
+        self.assertEqual(len(speaker.started), 1)
+        self.assertIs(memory.find("追加の確認"), empty)
+
+    async def test_a_first_no_information_level_is_still_reported(self):
+        conductor = build()
+        speaker, memory = conductor.speaker, conductor.memory
+        run = conductor.pool.start("見つかった情報はありますか")
+
+        level = memory.remember(
+            run,
+            level_event("l1", "この領域では具体的な情報は見つかりませんでした。"),
+        )
+        await feed(conductor, IdleTick())
+
+        self.assertEqual(level.state, "reporting")
+        self.assertEqual(speaker.started[-1][0], "report")
 
     async def test_a_repeat_speaks_even_though_it_repeats(self):
         conductor = build()

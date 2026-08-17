@@ -39,13 +39,13 @@ except the LAN IP the bootstrap script guesses on first run.
 
 ## 1. Install prerequisites (once per machine)
 
-| tool | why | check |
-|---|---|---|
-| **Docker + `docker compose` plugin** | runs LiveKit and Caddy | `docker compose version` |
-| **`uv`** | Python package/venv manager this project uses | `uv --version` |
-| **Node.js + npm** | builds the frontend (`frontend/`) | `node --version` |
-| **git** | cloning, and `scripts/build_asr_server.sh` vendors NeMo-Speech.cpp via git | |
-| **A C++ toolchain + cmake** | only if you're building `nemotron` (the local ASR engine) — gcc/clang, cmake, make | `cmake --version` |
+| tool                                         | why                                                                                  | check                      |
+| -------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------- |
+| **Docker + `docker compose` plugin** | runs LiveKit and Caddy                                                               | `docker compose version` |
+| **`uv`**                             | Python package/venv manager this project uses                                        | `uv --version`           |
+| **Node.js + npm**                      | builds the frontend (`frontend/`)                                                  | `node --version`         |
+| **git**                                | cloning, and`scripts/build_asr_server.sh` vendors NeMo-Speech.cpp via git          |                            |
+| **A C++ toolchain + cmake**            | only if you're building`nemotron` (the local ASR engine) — gcc/clang, cmake, make | `cmake --version`        |
 
 Arch: `sudo pacman -S docker docker-compose cmake base-devel nodejs npm`
 Debian/Ubuntu: `sudo apt install docker.io docker-compose-plugin cmake build-essential nodejs npm`
@@ -99,6 +99,7 @@ following:
    has something to serve at `/`.
 
 **What it does NOT do** — you still do these yourself:
+
 - Trust the CA in your browser (section 4 below).
 - Start the ASR/TTS/LLM/RAG servers and the agent itself (section 5–6).
 
@@ -236,7 +237,7 @@ if you want a locale other than `ja-JP` — and it must be a **full locale**
 (`ja-JP`), not a bare `ja`, or Nemotron silently falls back to language
 auto-detection.
 
-### `voxtral`, or **any other model served by vLLM** (Qwen-ASR included)
+### `voxtral` batch or realtime
 
 ```
 STT_PROVIDER=voxtral
@@ -247,10 +248,8 @@ STT_LANGUAGE=ja                 # base tag only here, not a locale
 
 Despite the name, `voxtral.py`'s **batch mode** (the default —
 `STT_USE_REALTIME` unset) is a plain OpenAI-compatible
-`POST /v1/audio/transcriptions` client. It doesn't actually know anything
-Voxtral-specific in that mode — it's the client you want for **any**
-vLLM-hosted ASR model served through the standard batch endpoint, Qwen-ASR
-included. Point `STT_MODEL`/`STT_BASE_URL` at it and that's the whole change.
+`POST /v1/audio/transcriptions` client. Point `STT_MODEL`/`STT_BASE_URL` at a
+non-realtime Voxtral model to use it.
 
 ```
 STT_USE_REALTIME=true
@@ -263,6 +262,21 @@ This generalizes to another model **only if vLLM serves that model through
 the same realtime entrypoint** — test it before relying on it. If it doesn't
 work, `app/stt/README.md` section 4 walks through copying `voxtral.py` to a
 new file as a real second provider (5 small steps).
+
+### `qwen` — VAD-segmented Qwen3-ASR, forced Japanese
+
+```
+STT_PROVIDER=qwen
+STT_BASE_URL=http://10.160.144.101:51027/v1
+STT_API_KEY=EMPTY
+STT_MODEL=Qwen/Qwen3-ASR-1.7B
+```
+
+This provider uses the normal batch transcription endpoint after LiveKit has
+ended an utterance with VAD. It always sends the vLLM endpoint's
+`language=ja` request value; `STT_LANGUAGE` cannot override it. It
+therefore has no interim transcripts, but it does not auto-detect into another
+language.
 
 **Verify a new ASR endpoint before wiring it into the agent:**
 
@@ -306,10 +320,10 @@ deployment exposes.
 
 This is the single easiest thing to get wrong switching engines:
 
-| engine | which variable actually pins the language | what happens to the other one |
-|---|---|---|
-| `supertonic` | `TTS_LANG` (read server-side as an SDK `lang=` code) | `TTS_INSTRUCTIONS` is sent but the server **ignores** it |
-| `qwen3` | `TTS_INSTRUCTIONS` (forwarded as the request's `instructions` field, which the server honors) | `TTS_LANG` is **never even sent** — `Qwen3TTS.build()` doesn't pass a `language` argument at all |
+| engine         | which variable actually pins the language                                                         | what happens to the other one                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `supertonic` | `TTS_LANG` (read server-side as an SDK `lang=` code)                                          | `TTS_INSTRUCTIONS` is sent but the server **ignores** it                                              |
+| `qwen3`      | `TTS_INSTRUCTIONS` (forwarded as the request's `instructions` field, which the server honors) | `TTS_LANG` is **never even sent** — `Qwen3TTS.build()` doesn't pass a `language` argument at all |
 
 So when you're on `qwen3`, the thing keeping it from drifting into English
 mid-sentence is `TTS_INSTRUCTIONS`, not `TTS_LANG`. The default in
@@ -353,25 +367,25 @@ Everything below is a `.env` variable (or a one-off env var on the
 README (`app/stt/README.md`, `app/tts/README.md`, `app/llm/README.md`,
 `app/rag/README.md`) — this is the cross-cutting stuff.
 
-| variable | what it controls | default |
-|---|---|---|
-| `VAD_MIN_SILENCE_SECONDS` | trailing silence before a turn counts as "over." Lower = snappier, cuts people off; higher = feels slow. The single biggest controllable chunk of end-to-end latency. | `0.55` |
-| `SESSION_MAX_UNRECOVERABLE_ERRORS` | consecutive STT/LLM/TTS failures the session tolerates before LiveKit closes it. LiveKit's own default (3) is too tight for a hand-started stack — a backend that comes up a minute late can burn through it before the first word. | `10` |
-| `TURN_TIMING=1` | per-turn latency breakdown on `python -m app`'s stdout | off |
-| `NEMO_STT_DEBUG=1` | traces Nemotron's realtime WebSocket dialog | off |
-| `LIVEKIT_AGENT_LOG_LEVEL=DEBUG` | shows tool-call execution (which function, what args) — invisible at the prod default `INFO` | `INFO` |
-| `RAG_PLAN_TIMEOUT_SECONDS` | watchdog budget until the wiki's `plan` frame arrives | `5` |
-| `RAG_LEVEL_TIMEOUT_SECONDS` | watchdog gap budget between frames once planning is done | `20` |
-| `RAG_STREAM_MAX_RETRIES` | extra attempts granted to one question on failure | `1` |
-| `TEXT_TEST_ACCESS_TOKEN` | if set, gates `GET /token` behind `Authorization: Bearer <this>` — leave unset for local/LAN use | unset (open) |
-| `LIVEKIT_AGENT_HTTP_PORT` | the agent worker's own internal health port | `8081` |
+| variable                             | what it controls                                                                                                                                                                                                                     | default      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------ |
+| `VAD_MIN_SILENCE_SECONDS`          | trailing silence before a turn counts as "over." Lower = snappier, cuts people off; higher = feels slow. The single biggest controllable chunk of end-to-end latency.                                                                | `0.55`     |
+| `VAD_ACTIVATION_THRESHOLD`         | Silero confidence required before audio starts a speech turn. Raise it to ignore distant voices and room noise; lower it if close, quiet speech is missed.                                                                            | `0.70`     |
+| `SESSION_MAX_UNRECOVERABLE_ERRORS` | consecutive STT/LLM/TTS failures the session tolerates before LiveKit closes it. LiveKit's own default (3) is too tight for a hand-started stack — a backend that comes up a minute late can burn through it before the first word. | `10`       |
+| `TURN_TIMING=1`                    | per-turn latency breakdown on`python -m app`'s stdout                                                                                                                                                                              | off          |
+| `NEMO_STT_DEBUG=1`                 | traces Nemotron's realtime WebSocket dialog                                                                                                                                                                                          | off          |
+| `LIVEKIT_AGENT_LOG_LEVEL=DEBUG`    | shows tool-call execution (which function, what args) — invisible at the prod default`INFO`                                                                                                                                       | `INFO`     |
+| `RAG_PLAN_TIMEOUT_SECONDS`         | watchdog budget until the wiki's`plan` frame arrives                                                                                                                                                                               | `5`        |
+| `RAG_LEVEL_TIMEOUT_SECONDS`        | watchdog gap budget between frames once planning is done                                                                                                                                                                             | `20`       |
+| `RAG_STREAM_MAX_RETRIES`           | extra attempts granted to one question on failure                                                                                                                                                                                    | `1`        |
+| `TEXT_TEST_ACCESS_TOKEN`           | if set, gates`GET /token` behind `Authorization: Bearer <this>` — leave unset for local/LAN use                                                                                                                                 | unset (open) |
+| `LIVEKIT_AGENT_HTTP_PORT`          | the agent worker's own internal health port                                                                                                                                                                                          | `8081`     |
 
 ### The one gotcha that isn't in any README: LiveKit's API key lives in two places
 
 `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` in `.env` is what `python -m app`
 uses to **mint** tokens for the browser. But the actual `livekit-server`
-container reads its accepted keys from **`livekit.yaml`** (`keys: devkey:
-secret`), which is mounted into the container as a static file — it does
+container reads its accepted keys from **`livekit.yaml`** (`keys: devkey: secret`), which is mounted into the container as a static file — it does
 **not** read `.env`. If you change the key/secret pair in `.env` for a
 non-local deployment, you must also edit the `keys:` block in `livekit.yaml`
 to match and recreate the container:

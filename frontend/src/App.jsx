@@ -12,6 +12,13 @@ import Composer from './components/Composer'
 
 const APP_MODE = import.meta.env.VITE_APP_MODE || (import.meta.env.DEV ? 'dev' : 'prod')
 const DEV_MODE = APP_MODE === 'dev'
+const VOICE_CAPTURE = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  // Gain control can amplify the very room tone the gate is meant to reject.
+  autoGainControl: false,
+  channelCount: 1,
+}
 
 export default function App() {
   const [connected, setConnected] = useState(DEV_MODE)
@@ -147,7 +154,7 @@ export default function App() {
     setListening(false)
     micOnRef.current = false
     listenHeld.current = false
-    bus.detach('mic')
+    bus.detach('mic', { restoreVoiceGate: false })
 
     if (agentTimer.current) return
     // Its own backoff, not the room's: the room reconnects fine every time,
@@ -174,7 +181,13 @@ export default function App() {
         return response.json()
       })
 
-      const next = new Room({ adaptiveStream: true, dynacast: true })
+      const next = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        // These defaults are used when setMicrophoneEnabled() creates the
+        // LiveKit track, not just by the development loopback below.
+        audioCaptureDefaults: VOICE_CAPTURE,
+      })
 
       next.on(RoomEvent.Connected, () => {
         retries.current = 0
@@ -202,7 +215,7 @@ export default function App() {
         roomRef.current = null
         agentAudioElements.current.clear()
         bus.detach('agent')
-        bus.detach('mic')
+        bus.detach('mic', { restoreVoiceGate: false })
         scheduleReconnect()
       })
 
@@ -232,14 +245,14 @@ export default function App() {
         setListening(true)
         setMicListening(true)
         if (publication.track?.mediaStreamTrack) {
-          bus.attach('mic', publication.track.mediaStreamTrack)
+          bus.enableVoiceGate(publication.track.mediaStreamTrack)
         }
       })
 
       next.on(RoomEvent.LocalTrackUnpublished, () => {
         setListening(false)
         setMicListening(false)
-        bus.detach('mic')
+        bus.detach('mic', { restoreVoiceGate: false })
       })
 
       // The agent mirrors every realtime RAG SSE event onto this topic
@@ -351,7 +364,7 @@ export default function App() {
       devMediaStream.current = null
     }
     bus.stopDevLoopback()
-    bus.detach('mic')
+    bus.detach('mic', { restoreVoiceGate: false })
     setListening(false)
   }
 
@@ -368,7 +381,7 @@ export default function App() {
       try {
         setError('')
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          audio: VOICE_CAPTURE,
         })
         const micTrack = stream.getAudioTracks()[0]
         if (!micTrack || !bus.startDevLoopback(stream, 1)) {
@@ -376,7 +389,7 @@ export default function App() {
           throw new Error('音声ループバックを開始できませんでした')
         }
         devMediaStream.current = stream
-        bus.attach('mic', micTrack)
+        bus.enableVoiceGate(micTrack)
         setListening(true)
       } catch (e) {
         stopDevMicrophone()
@@ -398,14 +411,20 @@ export default function App() {
     }
     try {
       const next = !listening
-      await active.localParticipant.setMicrophoneEnabled(next)
+      const publication = await active.localParticipant.setMicrophoneEnabled(next)
       // Disabling mutes the publication instead of unpublishing it, so
       // LocalTrackUnpublished never fires on the way down - the orb would
       // stay red and the agent would keep listening. Drive both from the
       // intent; LocalTrackPublished still handles the bus on the way up.
       setListening(next)
       setMicListening(next)
-      if (!next) bus.detach('mic')
+      if (next && publication?.track?.mediaStreamTrack) {
+        // LocalTrackPublished only fires the first time. Reinstall the gate
+        // after a muted microphone is turned back on as well.
+        bus.enableVoiceGate(publication.track.mediaStreamTrack)
+      } else if (!next) {
+        bus.detach('mic', { restoreVoiceGate: false })
+      }
     } catch (e) {
       setError(`マイクを有効にできませんでした: ${e.message || e}`)
     }

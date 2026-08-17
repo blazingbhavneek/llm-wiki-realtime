@@ -104,11 +104,15 @@ class WebSettings:
 @dataclass(frozen=True)
 class TuningSettings:
     vad_min_silence_seconds: float  # VAD_MIN_SILENCE_SECONDS
+    vad_activation_threshold: float  # VAD_ACTIVATION_THRESHOLD
 
     @classmethod
     def from_env(cls) -> "TuningSettings":
         return cls(
             vad_min_silence_seconds=env_float("VAD_MIN_SILENCE_SECONDS", 0.55),
+            # Higher than Silero's 0.5 default: distant voices and room noise
+            # must be more speech-like before they open a turn.
+            vad_activation_threshold=env_float("VAD_ACTIVATION_THRESHOLD", 0.70),
         )
 
 

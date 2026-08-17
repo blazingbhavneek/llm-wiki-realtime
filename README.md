@@ -83,7 +83,7 @@ the provider class, not from the wiring.
 
 | what | variable | registered names | default | how to add one |
 |---|---|---|---|---|
-| speech recognition | `STT_PROVIDER` | `nemotron`, `voxtral` | `nemotron` | [`app/stt/README.md`](app/stt/README.md) |
+| speech recognition | `STT_PROVIDER` | `nemotron`, `qwen`, `voxtral` | `nemotron` | [`app/stt/README.md`](app/stt/README.md) |
 | speech synthesis | `TTS_PROVIDER` | `supertonic`, `qwen3` | `supertonic` | [`app/tts/README.md`](app/tts/README.md) |
 | the LLM | `LLM_PROVIDER` | `openai_compatible` | `openai_compatible` | [`app/llm/README.md`](app/llm/README.md) |
 | the wiki backend | `RAG_PROVIDER` | `llm_wiki` | `llm_wiki` | [`app/rag/README.md`](app/rag/README.md) |
