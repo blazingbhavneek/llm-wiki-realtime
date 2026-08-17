@@ -10,6 +10,8 @@
 
 export const emptyResearch = () => ({
   runId: null,
+  agentRunId: null,
+  activeId: null,
   question: '',
   planVersion: 0,
   planningFallback: false,
@@ -32,10 +34,19 @@ function decorate(levels, results, activeId) {
 }
 
 export function researchReducer(state, event) {
+  // `ask` is the only frame allowed to change runs. Anything else carrying a
+  // different run id is a straggler from a superseded or retried attempt, and
+  // its level ids and plan version would be matched against the wrong state.
+  const runId = event.agent_run_id
+  if (runId && state.agentRunId && runId !== state.agentRunId && event.type !== 'ask') {
+    return state
+  }
+
   switch (event.type) {
     case 'ask': {
       // Local optimistic event: the user asked, the stream has not opened yet.
       const next = emptyResearch()
+      next.agentRunId = runId ?? null
       next.question = event.question
       next.status = 'planning'
       next.startedAt = performance.now()

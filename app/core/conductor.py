@@ -163,7 +163,9 @@ class Conductor:
             # their late SSE frames must not replace the newest run's status.
             run = self.pool.get(event.run_id)
             if run is not None and run.focus == FOREGROUND:
-                self.screen.publish_research(event.frame)
+                # Stamped, because the backend's own frames carry no run id and
+                # every run reuses level_1/level_2/level_3.
+                self.screen.publish_research({**event.frame, "agent_run_id": run.run_id})
             return
 
         if isinstance(event, PlanReady):
@@ -173,14 +175,16 @@ class Conductor:
             # Every run, foreground or not: the plan is what lets a follow-up be
             # told "that is coming" instead of opening a second run for it.
             self.memory.note_plan(run, event.planned_levels)
-            if run.focus == FOREGROUND and event.planned_levels:
-                self.pending.append(
-                    Pending(
-                        "prompt",
-                        prompts.plan_preview_instructions(run.question, event.planned_levels),
-                        run.run_id,
-                    )
-                )
+            # The preview said a second time what the model had already said
+            # before the tool call. Uncomment to restore.
+            # if run.focus == FOREGROUND and event.planned_levels:
+            #     self.pending.append(
+            #         Pending(
+            #             "prompt",
+            #             prompts.plan_preview_instructions(run.question, event.planned_levels),
+            #             run.run_id,
+            #         )
+            #     )
             return
 
         if isinstance(event, PlanRevised):
@@ -203,6 +207,15 @@ class Conductor:
             run = self.pool.get(event.run_id)
             if run is not None and self.pool.can_retry(run):
                 self.pool.retry(run)
+                # The new attempt replays plan v1 and the same level ids; without
+                # this the panel goes on rejecting them as stale. Foreground
+                # only, like every other publish: a superseded run that retries
+                # in the background must not pull the panel back to its own
+                # question, which is the very failure this stamp exists to stop.
+                if run.focus == FOREGROUND:
+                    self.screen.publish_research(
+                        {"type": "ask", "question": run.question, "agent_run_id": run.run_id}
+                    )
                 return
             self.memory.close_plan(event.run_id)
             # A background run may still fail after a newer question begins.
@@ -306,7 +319,9 @@ class Conductor:
         # Reset the one-run sidebar immediately. The reducer already handles
         # this optimistic event; waiting for a backend ``run`` frame leaves the
         # previous question visible during the new run's initial round trip.
-        self.screen.publish_research({"type": "ask", "question": question})
+        self.screen.publish_research(
+            {"type": "ask", "question": question, "agent_run_id": run.run_id}
+        )
         # Fixed text, no LLM round trip: fills the gap before the plan
         # preview (PlanReady, below) has anything to say.
         self.pending.append(Pending("notice", prompts.NOTICE_RESEARCHING, run.run_id))

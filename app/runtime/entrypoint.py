@@ -117,8 +117,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     conductor_task = asyncio.create_task(conductor.run(), name="conductor")
     ticker_task = asyncio.create_task(idle_ticker(inbox), name="idle-ticker")
 
-    conductor.queue_notice(prompts.GREETING)
-    inbox.put_nowait(IdleTick())  # kick the ladder so the greeting plays now
+    # Silent on connect. A page reload mints a fresh room (see web/http.py),
+    # so this fired on every reload and made debugging noisy. Uncomment both
+    # lines to bring the greeting back.
+    # conductor.queue_notice(prompts.GREETING)
+    # inbox.put_nowait(IdleTick())  # kick the ladder so the greeting plays now
 
     async def shutdown() -> None:
         ticker_task.cancel()

@@ -559,7 +559,7 @@ export default function App() {
           <div className="side-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain bg-canvas">
             {tab === 'conversation'
             ? <Transcript messages={messages} thinking={thinking} />
-            : <ResearchPanel research={research} />}
+            : <ResearchPanel key={research.agentRunId ?? 'idle'} research={research} />}
           </div>
       </aside>
 

@@ -135,6 +135,35 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conductor.pool.retried, 1)
         self.assertEqual(conductor.speaker.started[-1][0], "notice")
 
+    async def test_a_retry_republishes_the_ask_frame_with_the_run_id(self):
+        conductor = build()
+        run = conductor.pool.start("A")
+        run.attempts = 1
+
+        await feed(conductor, ResearchFailed(run.run_id, "level_gap"))
+        # The retry reopens the stream under the same local run id but the
+        # backend replays plan v1 and level_1; without a republished ask the
+        # panel goes on rejecting both as stale.
+        self.assertEqual(
+            conductor.screen.frames[-1],
+            {"type": "ask", "question": "A", "agent_run_id": run.run_id},
+        )
+
+    async def test_a_background_runs_retry_does_not_pull_the_panel_back(self):
+        conductor = build()
+        old = conductor.pool.start("古い質問")
+        conductor.start_research("新しい質問")  # supersedes: old -> background
+        conductor.screen.frames.clear()
+
+        await feed(conductor, ResearchFailed(old.run_id, "level_gap"))
+
+        # It is still retried - a superseded run is never cancelled - but the
+        # panel belongs to the newest question, so the republished ask that a
+        # foreground retry owes the panel must not be sent on its behalf.
+        self.assertEqual(conductor.pool.retried, 1)
+        self.assertEqual(conductor.screen.frames, [])
+
+    @unittest.skip("plan preview removed; see pre_branch_plan.md P2a")
     async def test_plan_preview_only_for_the_foreground_run(self):
         conductor = build()
         run = conductor.pool.start("A")
@@ -166,16 +195,32 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         await feed(conductor, ResearchProgress(background.run_id, {"type": "done"}))
         self.assertEqual(conductor.screen.frames, [])
         await feed(conductor, ResearchProgress(foreground.run_id, {"type": "level_start", "level_id": "l1"}))
-        self.assertEqual(conductor.screen.frames[-1]["type"], "level_start")
+        # Stamped with the foreground run's own id, not the backend's reused
+        # level_1/level_2/level_3 -- that stamp is what the reducer keys on.
+        self.assertEqual(
+            conductor.screen.frames[-1],
+            {"type": "level_start", "level_id": "l1", "agent_run_id": foreground.run_id},
+        )
+
+    async def test_research_progress_frames_carry_the_run_id(self):
+        conductor = build()
+        run = conductor.pool.start("A")
+        await feed(conductor, ResearchProgress(run.run_id, {"type": "plan", "version": 1}))
+        # The backend's own frame carries no run id; the Conductor stamps one
+        # on so the reducer can tell two runs' level_1 apart.
+        self.assertEqual(conductor.screen.frames[-1]["agent_run_id"], run.run_id)
+        self.assertEqual(conductor.screen.frames[-1]["type"], "plan")
 
     async def test_new_research_resets_the_sidebar_to_its_question(self):
         conductor = build()
         conductor.start_research("最新の質問")
+        run = conductor.pool.foreground_run()
         self.assertEqual(
             conductor.screen.frames[-1],
-            {"type": "ask", "question": "最新の質問"},
+            {"type": "ask", "question": "最新の質問", "agent_run_id": run.run_id},
         )
 
+    @unittest.skip("plan preview removed; see pre_branch_plan.md P2a")
     async def test_queued_background_plan_preview_is_discarded(self):
         conductor = build()
         old = conductor.pool.start("古い質問")
@@ -323,7 +368,7 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
             {"id": "l2", "objective": "違いと使い分けを説明する", "position": 2},
         ]
         await feed(conductor, PlanReady(run.run_id, run.planned_levels))
-        self.assertEqual(len(speaker.started), 1)  # the one spoken preview
+        self.assertEqual(len(speaker.started), 0)  # the preview is gone; see P2a
         await feed(conductor, speaker.finish("まず役割から確認します。"))
 
         # the backend splits stage 2 in two, mid-run
@@ -341,7 +386,7 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("調査中", read_retained(memory, "使用場面"))
         # ...and it cost no speech: a turn per plan tweak is the whole problem
-        self.assertEqual(len(speaker.started), 1)
+        self.assertEqual(len(speaker.started), 0)
 
     async def test_a_grown_plan_reaches_the_user_through_the_hand_off(self):
         conductor = build()
@@ -417,6 +462,7 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         # the dropped stage is never offered as the thing coming next
         self.assertNotIn("資料の続きを読み詳細を補う", prompt)
 
+    @unittest.skip("plan preview removed; see pre_branch_plan.md P2a")
     async def test_a_one_stage_plan_is_previewed_without_promising_a_next_step(self):
         # The backend plans one stage when it expects to answer in one. Told to
         # say "what comes first and what comes next", the model fills the slot
@@ -435,6 +481,7 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("まず何から確認し、次に何を見るかまで伝えれば十分です", prompt)
         self.assertNotIn("そのあと引数の意味を見ます", prompt)
 
+    @unittest.skip("plan preview removed; see pre_branch_plan.md P2a")
     async def test_the_spoken_preview_does_not_commit_to_a_stage_count(self):
         conductor = build()
         run = conductor.pool.start("A")

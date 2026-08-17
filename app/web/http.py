@@ -54,7 +54,7 @@ async def token(request: Request):
     Create a new room and participant token for every browser connection.
 
     A room is intentionally not reused across page reloads: a fresh browser
-    session must receive a fresh dispatch and its own agent greeting.
+    session must receive a fresh dispatch.
     """
     _authenticate_token_request(request)
     room = f"japanese-assistant-{uuid.uuid4().hex[:8]}"

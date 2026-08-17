@@ -44,5 +44,7 @@ class Screen:
     async def _publish(self, data: bytes, topic: str) -> None:
         try:
             await self.room.local_participant.publish_data(data, reliable=True, topic=topic)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Was a bare `pass`, which made a frame the browser never received
+            # indistinguishable from one it received and ignored.
+            print(f"[SCREEN DROP] topic={topic} bytes={len(data)} {exc!r}", flush=True)
