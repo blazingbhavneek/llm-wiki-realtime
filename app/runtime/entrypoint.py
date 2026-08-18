@@ -8,6 +8,8 @@ decision lives in ``Conductor.handle``, and the callbacks that feed it live in
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 import os
 
 from livekit import agents
@@ -30,18 +32,43 @@ from app.rag import build_research_pool
 from app.rag.llm_wiki import stream_url
 from app.runtime.producers import attach, idle_ticker
 from app.stt import build_stt
-from app.tts import build_tts_pair
+from app.tts import build_tts_pair, get_provider
+
+
+def _requested_voice(job_metadata: str) -> str | None:
+    """The frontend's chosen voice, if ``/token`` carried one into the dispatch.
+
+    ``job_metadata`` is whatever ``create_room_token`` passed as the manual
+    dispatch's ``metadata`` - ``"{}"`` when the frontend didn't ask for a
+    specific voice, or malformed JSON if this ever runs against a dispatch
+    this app didn't create.
+    """
+    if not job_metadata:
+        return None
+    try:
+        data = json.loads(job_metadata)
+    except ValueError:
+        return None
+    voice = data.get("voice") if isinstance(data, dict) else None
+    return voice or None
 
 
 async def entrypoint(ctx: agents.JobContext) -> None:
     settings = Settings.from_env()
     await ctx.connect()
+
+    tts_settings = get_provider()().settings_from_env()
+    requested_voice = _requested_voice(ctx.job.metadata)
+    if requested_voice:
+        tts_settings = dataclasses.replace(tts_settings, voice=requested_voice)
+
     dbg(
         "ENTRYPOINT_CONNECTED",
         room=ctx.room.name,
         LLM_MODEL=os.getenv("LLM_MODEL"),
         STT_MODEL=os.getenv("STT_MODEL"),
         TTS_MODEL=os.getenv("TTS_MODEL"),
+        TTS_VOICE=tts_settings.voice,
         RAG_STREAM_URL=stream_url(),
     )
 
@@ -50,7 +77,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
 
     stt = build_stt(vad=ctx.proc.userdata["vad"])
     llm = build_llm()
-    tts_pair = build_tts_pair()
+    tts_pair = build_tts_pair(tts_settings)
 
     assistant = Assistant()
     session = AgentSession[AssistantDeps](

@@ -30,10 +30,11 @@ from app.tts.base import TTSProvider, TTSSettings
 # maximum while still keeping requests large enough to avoid needless latency.
 MAX_REQUEST_CHARS = 150
 
-# Keep Irodori's character fixed until we deliberately expose controls for it.
-# These values are intentionally not read from TTS_* environment variables.
+# The model id is fixed; the voice is now ``settings.voice`` (TTS_VOICE, or a
+# per-session override carried in the LiveKit dispatch metadata) like every
+# other provider. The remaining knobs stay fixed until we deliberately expose
+# controls for them - they are not read from TTS_* environment variables.
 IRODORI_MODEL = "irodori-tts"
-IRODORI_VOICE = "clone_ref1"
 IRODORI_SEED = 20260818
 IRODORI_SPEED = 1.0
 IRODORI_CFG_SCALE_TEXT = 7.0
@@ -164,7 +165,7 @@ class _IrodoriRequestStream(lk_tts.ChunkedStream):
     async def _run(self, output_emitter: lk_tts.AudioEmitter) -> None:
         payload = {
             "model": IRODORI_MODEL,
-            "voice": IRODORI_VOICE,
+            "voice": self._irodori_tts._settings.voice,
             "input": self.input_text,
             "response_format": "wav",
             "speed": IRODORI_SPEED,
@@ -222,12 +223,13 @@ class IrodoriTTS(TTSProvider):
     hosted_by = "remote"
 
     default_model = "irodori-tts"
-    default_voice = "None"
+    default_voice = "clone_ref1"
     default_base_url = "http://10.160.144.101:51026/v1"
     default_response_format = "wav"
     native_sample_rate = 48000
     streams_audio = False
     honors_instructions = True
+    supports_voice_listing = True
 
     default_reply_min_chars = 30
     default_report_min_chars = 180

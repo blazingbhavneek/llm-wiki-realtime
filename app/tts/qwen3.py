@@ -25,6 +25,7 @@ class Qwen3TTS(TTSProvider):
     native_sample_rate = 24000
     streams_audio = False
     honors_instructions = True
+    supports_voice_listing = True
 
     # Qwen is served through OpenAI's non-streaming TTS endpoint.  A short
     # threshold turns one reply into many independent synthesis requests,

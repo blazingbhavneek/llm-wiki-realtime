@@ -24,6 +24,10 @@ export default defineConfig({
         target: process.env.VITE_TOKEN_SERVER_URL || 'http://127.0.0.1:51027',
         changeOrigin: true,
       },
+      '/tts': {
+        target: process.env.VITE_TOKEN_SERVER_URL || 'http://127.0.0.1:51027',
+        changeOrigin: true,
+      },
     },
   },
 })

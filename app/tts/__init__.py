@@ -33,6 +33,7 @@ __all__ = [
     "build_tts",
     "build_tts_pair",
     "get_provider",
+    "list_voices",
 ]
 
 
@@ -45,6 +46,15 @@ def get_provider(name: str | None = None) -> type[TTSProvider]:
         raise ValueError(f"unknown TTS provider {key!r}; registered: {known}")
     module_name, _, class_name = target.partition(":")
     return getattr(importlib.import_module(module_name), class_name)
+
+
+async def list_voices(settings: TTSSettings | None = None) -> list[str]:
+    """Voice ids the selected provider's endpoint advertises, or ``[]`` if it can't."""
+    provider_cls = get_provider(settings.provider if settings else None)
+    if not provider_cls.supports_voice_listing:
+        return []
+    provider = provider_cls()
+    return await provider.list_voices(settings or provider.settings_from_env())
 
 
 def build_tts(settings: TTSSettings | None = None) -> lk_tts.TTS:

@@ -13,6 +13,12 @@ The callers are `build_tts()` and `build_tts_pair()` in `__init__.py`.
 `app.core.speaker` takes the pair already built and installs the right one per
 speech; it never imports a provider, a plugin, or `livekit.agents.tts`.
 
+A fourth capability flag, `supports_voice_listing`, and a concrete
+`list_voices(settings)` on the base cover the OpenAI-compatible
+`GET {base_url}/audio/voices` convention (`{"voices": [...]}`) that the
+frontend's voice picker calls through `app.tts.list_voices()` /
+`GET /tts/voices` (§8).
+
 The registry maps names to **import strings**, not classes, and resolves them
 with `importlib`. Importing `app.tts` must not drag
 `supertonic`/`soundfile`/`onnxruntime` into the agent process when
@@ -47,8 +53,9 @@ sentence thresholds come with it.
 
 | name | hosted by | endpoint (default) | format / sample rate | streams | voices | language pin |
 |---|---|---|---|---|---|---|
-| `supertonic` | self — `app/tts/supertonic.py::serve()`, ONNX Runtime on CPU | `http://127.0.0.1:8004/v1` | `wav` / 44 100 Hz | no | `F1`, and whatever else `supertonic-3` ships (`get_voice_style`) | `TTS_LANG`, read server-side; `instructions` is ignored |
-| `qwen3` | vLLM on the shared GPU box (outside this repo) | `http://10.160.144.101:51027/v1` | `pcm` / 24 000 Hz | no | `Ono_Anna` and the other Qwen custom voices | `instructions`, honored by the server |
+| `supertonic` | self — `app/tts/supertonic.py::serve()`, ONNX Runtime on CPU | `http://127.0.0.1:8004/v1` | `wav` / 44 100 Hz | no | `F1`, and whatever else `supertonic-3` ships (`get_voice_style`); no `GET /audio/voices` (`supports_voice_listing = False`) | `TTS_LANG`, read server-side; `instructions` is ignored |
+| `qwen3` | vLLM on the shared GPU box (outside this repo) | `http://10.160.144.101:51027/v1` | `pcm` / 24 000 Hz | no | `Ono_Anna` and the other Qwen custom voices, listed via `GET /audio/voices` | `instructions`, honored by the server |
+| `irodori` | remote — `app/tts/irodori.py`, same GPU box, an almost-OpenAI-compatible WAV endpoint | `http://10.160.144.101:51026/v1` | `wav` / 48 000 Hz | no | `clone_ref1` and any other configured reference voices, listed via `GET /audio/voices` | `instructions`, honored by the server |
 
 ## 4. Adding a vLLM-hosted model
 
@@ -129,3 +136,29 @@ flag.
   `.env` setting `TTS_BASE_URL=http://127.0.0.1:8004/v1` kept the stack
   working. `SupertonicTTS.default_base_url` is now `http://127.0.0.1:8004/v1`,
   matching the server and `.env`.
+
+## 8. Frontend voice selection
+
+`TTS_VOICE` is still the deployment default. The frontend can override it
+*per session* for providers that set `supports_voice_listing = True`
+(`qwen3`, `irodori` — not `supertonic`, which has no `GET /audio/voices`):
+
+1. `GET /tts/voices` (`app/web/http.py::tts_voices`) resolves the active
+   `TTS_PROVIDER` and returns `{"provider", "voices", "supports_selection"}`.
+   It calls `app.tts.list_voices()`, which calls the provider's
+   `list_voices(settings)` — the base's default implementation, GETting
+   `{TTS_BASE_URL}/audio/voices` directly (§1). The frontend never talks to
+   the GPU box itself.
+2. The frontend sends its choice as `GET /token?voice=<id>`. `create_room_token`
+   (`app/web/tokens.py`) folds it into the manual dispatch's `metadata` as
+   `{"voice": "<id>"}` — the same LiveKit dispatch that `LIVEKIT_MANUAL_DISPATCH`
+   already creates, just no longer hardcoded to `"{}"`.
+3. `entrypoint.py`'s `_requested_voice()` reads `ctx.job.metadata` back out and
+   overrides `TTSSettings.voice` before `build_tts_pair()` runs.
+
+This is a per-*room* choice, not a live switch: the pipeline builds one TTS
+per job, so changing voice mid-conversation means reconnecting (a fresh
+`/token` call), the same way the frontend already reconnects on any dropped
+session. Auto-dispatch (`LIVEKIT_MANUAL_DISPATCH=false`) has no dispatch call
+to carry metadata on, so a requested voice is silently ignored in that mode —
+same pre-existing limitation the dispatch metadata channel always had.

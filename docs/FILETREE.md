@@ -61,15 +61,15 @@ Generated/vendored, never hand-edit, not itemised below: `.venv/`, `frontend/nod
 
 | File | Owns | Must never |
 |---|---|---|
-| `http.py` | FastAPI `app`: `/health`, `/`, mounts `frontend/dist` | Serve `frontend/src` |
-| `tokens.py` | `/token`'s LiveKit room/dispatch/JWT minting | — |
+| `http.py` | FastAPI `app`: `/health`, `/`, `/tts/voices` (proxies the active provider's voice list), mounts `frontend/dist` | Serve `frontend/src` |
+| `tokens.py` | `/token`'s LiveKit room/dispatch/JWT minting; folds `?voice=` into the dispatch metadata `entrypoint.py` reads back | — |
 | `tls.py` | Local dev cert generation, only when `TEXT_TEST_TLS` is set | Run when Caddy is the one terminating TLS |
 
 ### `app/runtime/` — the only layer that knows every module exists
 
 | File | Owns | Must never |
 |---|---|---|
-| `entrypoint.py` | `entrypoint(ctx)` — builds providers/session/Conductor, wires callbacks, the (currently disabled) greeting | Contain a decision — hand everything to `Conductor` |
+| `entrypoint.py` | `entrypoint(ctx)` — builds providers/session/Conductor, wires callbacks, the (currently disabled) greeting; `_requested_voice()` reads a per-session `TTS_VOICE` override off `ctx.job.metadata` | Contain a decision — hand everything to `Conductor` |
 | `producers.py` | `attach()`/`idle_ticker()` — LiveKit session/room callbacks → inbox events | React to anything itself |
 | `worker.py` | Process bootstrap: `prewarm`, `start_web_server`, `run_combined_server`, proxy scrubbing | — |
 
@@ -77,13 +77,15 @@ Generated/vendored, never hand-edit, not itemised below: `.venv/`, `frontend/nod
 
 | File | Owns | Must never |
 |---|---|---|
-| `App.jsx` | Room connection/reconnect, orb state machine, always-on mic wiring, text send, data-channel dispatch | — |
+| `App.jsx` | Room connection/reconnect, orb state machine, always-on mic wiring, text send, data-channel dispatch, voice-selection state (`GET /tts/voices`, the `tts_voice` cookie, `?voice=` on `/token`) | — |
 | `lib/audio.js` | `AudioBus` — Web Audio taps for mic/agent RMS levels | Use `createMediaElementSource` on the agent track (would silence playback) |
 | `lib/research.js` | `researchReducer` — client mirror of the SSE state machine, the `agent_run_id` guard (§4/§P3), the `DEV_MODE` demo script | Accept a frame from a different `agent_run_id` unless it's `type: 'ask'` |
+| `lib/cookies.js` | `getCookie`/`setCookie` — plain `document.cookie` helpers | — |
 | `components/ResearchPanel.jsx` | Renders `research` state | Render markdown/diagrams (bundle-weight rule, stated in the file) |
 | `components/Transcript.jsx` | Conversation bubbles; dedupes streaming interims by `lk.segment_id` | — |
 | `components/Composer.jsx` | Text input only | Contain mic control (lives on `WaveField`) |
 | `components/WaveField.jsx` | The orb's WebGL visualiser and the mic button in one | — |
+| `components/VoiceSelect.jsx` | Top-left voice dropdown; renders nothing when the active provider has no voices to offer | — |
 
 ### `tests/`
 
@@ -95,6 +97,7 @@ Generated/vendored, never hand-edit, not itemised below: `.venv/`, `frontend/nod
 | `test_attention.py` | Push-to-talk gate + command regex |
 | `test_sse.py` | SSE parser only |
 | `test_providers.py` | Every registered provider resolves offline, declares capability flags, has env defaults — never calls `build()` |
+| `test_entrypoint.py` | `_requested_voice()` — parses the dispatch-metadata voice override, never raises on bad input |
 | `live/` | `live_stt.py`, `live_tts.py`, `live_helpers.py` — real `build()` against real servers/endpoints. Filenames deliberately don't start with `test_`, so default discovery skips them (§5) |
 | `fixtures/sample_ja.wav` | The live-test fixture |
 

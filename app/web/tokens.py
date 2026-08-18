@@ -7,6 +7,7 @@ lives here.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from livekit import api
@@ -29,8 +30,14 @@ async def create_room_token(
     room: str,
     identity: str,
     settings: LiveKitSettings,
+    voice: str | None = None,
 ) -> dict[str, Any]:
     """Create the room, dispatch the agent into it, and mint the browser's JWT.
+
+    ``voice`` is the frontend's chosen TTS voice for this session, if any - it
+    rides in as the job's dispatch metadata (manual dispatch only) and
+    ``entrypoint.py`` reads it back off ``ctx.job.metadata`` to override
+    ``TTS_VOICE`` before building the TTS pair for this room.
 
     Returns the payload the ``/token`` route hands back. Exceptions propagate to
     the route, which turns them into the 500 the frontend knows how to report.
@@ -55,8 +62,11 @@ async def create_room_token(
         )
 
         if manual_dispatch:
+            dispatch_metadata = json.dumps({"voice": voice} if voice else {})
             dispatch = await lkapi.agent_dispatch.create_dispatch(
-                api.CreateAgentDispatchRequest(room=room, agent_name=agent_name, metadata="{}")
+                api.CreateAgentDispatchRequest(
+                    room=room, agent_name=agent_name, metadata=dispatch_metadata
+                )
             )
             print(
                 f"MANUAL DISPATCH CREATED room={room} "

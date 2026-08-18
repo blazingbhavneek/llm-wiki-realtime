@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import Settings
+from app.tts import get_provider, list_voices
 from app.web.tokens import create_room_token
 
 app = FastAPI()
@@ -48,6 +49,19 @@ def _authenticate_token_request(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid token endpoint credentials")
 
 
+@app.get("/tts/voices")
+async def tts_voices():
+    """Voices the active TTS_PROVIDER's endpoint advertises, for the frontend picker."""
+    provider_cls = get_provider()
+    if not provider_cls.supports_voice_listing:
+        return {"provider": provider_cls.name, "voices": [], "supports_selection": False}
+    try:
+        voices = await list_voices()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"could not list voices: {exc!r}") from exc
+    return {"provider": provider_cls.name, "voices": voices, "supports_selection": True}
+
+
 @app.get("/token")
 async def token(request: Request):
     """
@@ -59,6 +73,7 @@ async def token(request: Request):
     _authenticate_token_request(request)
     room = f"japanese-assistant-{uuid.uuid4().hex[:8]}"
     identity = f"user-{uuid.uuid4().hex[:8]}"
+    voice = request.query_params.get("voice") or None
 
     try:
         # Read per request, as this route always has: the web server is started
@@ -67,6 +82,7 @@ async def token(request: Request):
             room=room,
             identity=identity,
             settings=Settings.from_env().livekit,
+            voice=voice,
         )
     except Exception as exc:
         print("TOKEN_ENDPOINT_FAILED:", repr(exc), flush=True)

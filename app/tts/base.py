@@ -14,6 +14,8 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
+import aiohttp
+
 if TYPE_CHECKING:  # pragma: no cover - typing only, keeps livekit off the import path
     from livekit.agents import tts as lk_tts
 
@@ -55,6 +57,7 @@ class TTSProvider(abc.ABC):
     native_sample_rate: ClassVar[int]
     streams_audio: ClassVar[bool]  # False for both -> StreamAdapter + long sentences
     honors_instructions: ClassVar[bool]  # supertonic: False, it reads TTS_LANG server-side
+    supports_voice_listing: ClassVar[bool]  # True if GET {base_url}/audio/voices is served
     default_reply_min_chars: ClassVar[int]
     default_report_min_chars: ClassVar[int]
 
@@ -95,3 +98,24 @@ class TTSProvider(abc.ABC):
     def serve(self, settings: TTSSettings) -> None:
         """Host this model locally. Only for hosted_by == 'self'."""
         raise NotImplementedError
+
+    async def list_voices(self, settings: TTSSettings) -> list[str]:
+        """Voice ids the endpoint advertises. Only called when ``supports_voice_listing``.
+
+        This default hits the OpenAI-compatible ``GET {base_url}/audio/voices``
+        convention every vLLM-hosted provider in this registry follows
+        (``{"voices": [...], "uploaded_voices": [...]}}``). A provider whose
+        endpoint doesn't serve that route sets ``supports_voice_listing = False``
+        instead of overriding this.
+        """
+        headers = {"User-Agent": "LiveKit Agents"}
+        if settings.api_key and settings.api_key != "EMPTY":
+            headers["Authorization"] = f"Bearer {settings.api_key}"
+        url = f"{settings.base_url.rstrip('/')}/audio/voices"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                response.raise_for_status()
+                data = await response.json()
+        return sorted(data.get("voices", []))

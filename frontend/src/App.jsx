@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { Room, RoomEvent, Track } from 'livekit-client'
 import { AudioBus } from './lib/audio'
+import { getCookie, setCookie } from './lib/cookies'
 import {
   DEMO_QUESTION, DEMO_TRANSCRIPT, emptyResearch, isRunning, researchReducer, runDemo,
 } from './lib/research'
@@ -9,9 +10,14 @@ import WaveField from './components/WaveField'
 import Transcript from './components/Transcript'
 import ResearchPanel from './components/ResearchPanel'
 import Composer from './components/Composer'
+import VoiceSelect from './components/VoiceSelect'
 
 const APP_MODE = import.meta.env.VITE_APP_MODE || (import.meta.env.DEV ? 'dev' : 'prod')
 const DEV_MODE = APP_MODE === 'dev'
+const VOICE_COOKIE = 'tts_voice'
+// DEV_MODE never talks to the backend, so GET /tts/voices has nothing to
+// return there - this stands in for it so the picker has something to show.
+const DEMO_VOICES = ['clone_ref1', 'conan', 'sakura', 'yuki']
 const VOICE_CAPTURE = {
   echoCancellation: true,
   noiseSuppression: true,
@@ -34,6 +40,8 @@ export default function App() {
   const [mode, setMode] = useState('dormant')
   const [attentionOpen, setAttentionOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [voices, setVoices] = useState(() => (DEV_MODE ? DEMO_VOICES : []))
+  const [voice, setVoice] = useState(() => getCookie(VOICE_COOKIE) || '')
   const [research, dispatch] = useReducer(researchReducer, undefined, () => {
     const base = emptyResearch()
     return DEV_MODE ? researchReducer(base, { type: 'ask', question: DEMO_QUESTION }) : base
@@ -51,6 +59,7 @@ export default function App() {
   const devMediaStream = useRef(null)
   const demoStops = useRef(new Set())
   const listenHeld = useRef(false)
+  const voiceRef = useRef(voice)
   const microphoneLive = useRef(false)
   const microphoneStarting = useRef(false)
   const agentRetries = useRef(0)
@@ -133,6 +142,39 @@ export default function App() {
 
   const orbState = useMemo(() => ({ mode, thinking }), [mode, thinking])
 
+  // --- voice selection ------------------------------------------------------
+  // The picker only appears once the active TTS_PROVIDER's voices are known.
+  // A cookie from a previous deployment's provider may no longer be valid;
+  // drop it silently rather than send an unknown voice to the agent.
+  useEffect(() => {
+    if (DEV_MODE) return undefined
+    let cancelled = false
+    fetch('/tts/voices', { cache: 'no-store' })
+      .then(response => (response.ok ? response.json() : { voices: [], supports_selection: false }))
+      .then(data => {
+        if (cancelled) return
+        const list = data.supports_selection ? data.voices || [] : []
+        setVoices(list)
+        if (voiceRef.current && !list.includes(voiceRef.current)) {
+          voiceRef.current = ''
+          setVoice('')
+          setCookie(VOICE_COOKIE, '')
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  // An explicit choice, so it takes effect now: a fresh /token call mints a
+  // new dispatch carrying the new voice, the same route a dropped session
+  // already uses to recover (see RoomEvent.Disconnected below).
+  const handleVoiceChange = useCallback(next => {
+    setVoice(next)
+    voiceRef.current = next
+    setCookie(VOICE_COOKIE, next)
+    roomRef.current?.disconnect()
+  }, [])
+
   // --- development fixtures ----------------------------------------------
   useEffect(() => {
     if (!DEV_MODE) return undefined
@@ -192,7 +234,8 @@ export default function App() {
     connecting.current = true
     setError('')
     try {
-      const credentials = await fetch('/token', { cache: 'no-store' }).then(async response => {
+      const voiceQuery = voiceRef.current ? `?voice=${encodeURIComponent(voiceRef.current)}` : ''
+      const credentials = await fetch(`/token${voiceQuery}`, { cache: 'no-store' }).then(async response => {
         if (!response.ok) throw new Error(await response.text())
         return response.json()
       })
@@ -477,7 +520,10 @@ export default function App() {
   return (
     <main data-sidebar-open={sidebarOpen} className="workspace-layout h-dvh w-full overflow-hidden bg-canvas text-ink">
       <section className="relative flex min-w-0 flex-col overflow-hidden pt-[26px] pr-[clamp(24px,4vw,56px)] pb-[clamp(24px,3.4vh,38px)] pl-[clamp(24px,4vw,56px)]">
-        <header className="relative z-10 flex items-center justify-end gap-4">
+        <header className="relative z-10 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-1.5">
+            <VoiceSelect voices={voices} value={voice} onChange={handleVoiceChange} />
+          </div>
           <div className="flex items-center gap-1.5">
             <span
               className={`inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-[12px] font-medium ${

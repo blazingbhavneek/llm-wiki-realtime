@@ -51,6 +51,7 @@ class SupertonicTTS(TTSProvider):
     native_sample_rate = 44100
     streams_audio = False
     honors_instructions = False
+    supports_voice_listing = False  # no GET /audio/voices; voices come from get_voice_style
 
     default_reply_min_chars = 30
     default_report_min_chars = 180
