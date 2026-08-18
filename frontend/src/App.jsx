@@ -32,6 +32,7 @@ export default function App() {
   const [tab, setTab] = useState(DEV_MODE ? 'research' : 'conversation')
   const [error, setError] = useState('')
   const [mode, setMode] = useState('dormant')
+  const [attentionOpen, setAttentionOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [research, dispatch] = useReducer(researchReducer, undefined, () => {
     const base = emptyResearch()
@@ -50,7 +51,8 @@ export default function App() {
   const devMediaStream = useRef(null)
   const demoStops = useRef(new Set())
   const listenHeld = useRef(false)
-  const micOnRef = useRef(false)
+  const microphoneLive = useRef(false)
+  const microphoneStarting = useRef(false)
   const agentRetries = useRef(0)
   const agentTimer = useRef(null)
 
@@ -78,8 +80,8 @@ export default function App() {
     volumeFrame.current = requestAnimationFrame(step)
   }, [])
 
-  // The orb is the whole gate: while it is on, anything said is a turn, and
-  // while it is off the agent ignores speech entirely. There is no wake word.
+  // The orb is a manual override for the server-side attention gate. The mic
+  // itself stays published so a wake phrase can be transcribed while dormant.
   const publishListen = useCallback((held, { force = false } = {}) => {
     if (!force && listenHeld.current === held) return
     listenHeld.current = held
@@ -96,11 +98,24 @@ export default function App() {
     publishListen(listenHeld.current, { force: true })
   }, [publishListen])
 
-  // Pressing the orb on means "listening" until it is pressed again.
-  const setMicListening = useCallback(on => {
-    micOnRef.current = on
-    publishListen(on)
-  }, [publishListen])
+  const enableMicrophone = useCallback(async room => {
+    if (!room || !navigator.mediaDevices?.getUserMedia) return null
+    if (microphoneLive.current || microphoneStarting.current) return null
+    microphoneStarting.current = true
+    try {
+      const publication = await room.localParticipant.setMicrophoneEnabled(true)
+      microphoneLive.current = true
+      setListening(true)
+      if (publication?.track?.mediaStreamTrack) {
+        // Keep audio flowing continuously. Attention decides whether a completed
+        // transcript is a turn; muting quiet frames here can delay VAD/STT.
+        bus.attach('mic', publication.track.mediaStreamTrack)
+      }
+      return publication
+    } finally {
+      microphoneStarting.current = false
+    }
+  }, [bus])
 
   // --- orb mode -----------------------------------------------------------
   // Polled rather than pushed: audio levels change every frame, but the orb
@@ -110,11 +125,11 @@ export default function App() {
       let next = 'dormant'
       if (bus.agentLevel > 0.06) next = 'speaking'
       else if (thinking) next = 'thinking'
-      else if (listening) next = 'listening'
+      else if (attentionOpen) next = 'listening'
       setMode(current => (current === next ? current : next))
     }, 120)
     return () => clearInterval(id)
-  }, [bus, listening, thinking])
+  }, [attentionOpen, bus, thinking])
 
   const orbState = useMemo(() => ({ mode, thinking }), [mode, thinking])
 
@@ -152,7 +167,8 @@ export default function App() {
     setAgentPresent(false)
     roomRef.current?.localParticipant.setMicrophoneEnabled(false).catch(() => {})
     setListening(false)
-    micOnRef.current = false
+    microphoneLive.current = false
+    setAttentionOpen(false)
     listenHeld.current = false
     bus.detach('mic', { restoreVoiceGate: false })
 
@@ -200,6 +216,9 @@ export default function App() {
         setAgentPresent(true)
         setError('')
         republishListen()
+        enableMicrophone(next).catch(e => {
+          setError(`マイクを有効にできませんでした: ${e.message || e}`)
+        })
       })
 
       next.on(RoomEvent.ParticipantDisconnected, participant => {
@@ -210,7 +229,8 @@ export default function App() {
         setConnected(false)
         setAgentPresent(false)
         setListening(false)
-        micOnRef.current = false
+        microphoneLive.current = false
+        setAttentionOpen(false)
         listenHeld.current = false
         roomRef.current = null
         agentAudioElements.current.clear()
@@ -242,16 +262,16 @@ export default function App() {
 
       next.on(RoomEvent.LocalTrackPublished, publication => {
         if (publication.kind !== Track.Kind.Audio) return
+        microphoneLive.current = true
         setListening(true)
-        setMicListening(true)
         if (publication.track?.mediaStreamTrack) {
-          bus.enableVoiceGate(publication.track.mediaStreamTrack)
+          bus.attach('mic', publication.track.mediaStreamTrack)
         }
       })
 
       next.on(RoomEvent.LocalTrackUnpublished, () => {
         setListening(false)
-        setMicListening(false)
+        microphoneLive.current = false
         bus.detach('mic', { restoreVoiceGate: false })
       })
 
@@ -265,6 +285,10 @@ export default function App() {
           if (topic === 'research') dispatch(event)
           else if (topic === 'attention' && event.type === 'duck') {
             setAgentDucked(Boolean(event.ducked))
+          } else if (topic === 'attention' && event.type === 'attention') {
+            // Blue means the mic remains available but the server discards
+            // ordinary speech. Red is reserved for active attention.
+            setAttentionOpen(event.state === 'open')
           } else if (topic === 'attention' && event.type === 'agent_status') {
             // The agent's own diagnosis, which beats waiting for the
             // participant to time out - and it names the component that broke.
@@ -317,12 +341,16 @@ export default function App() {
 
       await next.connect(credentials.url, credentials.token)
       roomRef.current = next
+      republishListen()
       // ParticipantConnected only fires for arrivals after this point, and the
       // dispatch can beat us into the room.
       for (const participant of next.remoteParticipants.values()) {
         if (participant.identity?.startsWith('agent-')) {
           agentRetries.current = 0
           setAgentPresent(true)
+          enableMicrophone(next).catch(e => {
+            setError(`マイクを有効にできませんでした: ${e.message || e}`)
+          })
         }
       }
       return next
@@ -333,7 +361,7 @@ export default function App() {
     } finally {
       connecting.current = false
     }
-  }, [bus, scheduleReconnect, setAgentDucked, setMicListening, republishListen, handleAgentGone])
+  }, [bus, scheduleReconnect, setAgentDucked, republishListen, handleAgentGone, enableMicrophone])
 
   useEffect(() => { connectRef.current = connect })
 
@@ -389,7 +417,7 @@ export default function App() {
           throw new Error('音声ループバックを開始できませんでした')
         }
         devMediaStream.current = stream
-        bus.enableVoiceGate(micTrack)
+        bus.attach('mic', micTrack)
         setListening(true)
       } catch (e) {
         stopDevMicrophone()
@@ -399,9 +427,7 @@ export default function App() {
     }
     const active = roomRef.current || await connect()
     if (!active) return
-    if (!agentPresent && !listening) {
-      // Turning the orb red with nobody on the other end is precisely the
-      // failure this is here to stop: it looks like it is listening, forever.
+    if (!agentPresent) {
       setError('エージェントに接続していません。再接続を待っています。')
       return
     }
@@ -410,21 +436,10 @@ export default function App() {
       return
     }
     try {
-      const next = !listening
-      const publication = await active.localParticipant.setMicrophoneEnabled(next)
-      // Disabling mutes the publication instead of unpublishing it, so
-      // LocalTrackUnpublished never fires on the way down - the orb would
-      // stay red and the agent would keep listening. Drive both from the
-      // intent; LocalTrackPublished still handles the bus on the way up.
-      setListening(next)
-      setMicListening(next)
-      if (next && publication?.track?.mediaStreamTrack) {
-        // LocalTrackPublished only fires the first time. Reinstall the gate
-        // after a muted microphone is turned back on as well.
-        bus.enableVoiceGate(publication.track.mediaStreamTrack)
-      } else if (!next) {
-        bus.detach('mic', { restoreVoiceGate: false })
-      }
+      if (!listening) await enableMicrophone(active)
+      // Clicking the orb is now an explicit attention override, not a
+      // microphone switch. A wake-word turn controls this state independently.
+      publishListen(!listenHeld.current)
     } catch (e) {
       setError(`マイクを有効にできませんでした: ${e.message || e}`)
     }
@@ -492,10 +507,10 @@ export default function App() {
           <button
             type="button"
             onClick={toggleMic}
-            aria-pressed={listening}
-            aria-label={listening ? 'マイクを切る' : 'マイクを入れる'}
-            className={`aspect-square w-[min(46vh,40vw,400px)] rounded-full border-0 bg-transparent p-0 transition-transform duration-300 hover:scale-[1.015] active:scale-[0.985] ${
-              listening ? 'scale-[1.01]' : ''
+            aria-pressed={attentionOpen}
+            aria-label={attentionOpen ? '手動での聞き取りを止める' : '手動での聞き取りを始める'}
+            className={`aspect-square w-[min(46vh,40vw,400px)] overflow-visible rounded-full border-0 bg-transparent p-0 transition-transform duration-300 hover:scale-[1.015] active:scale-[0.985] ${
+              attentionOpen ? 'scale-[1.01]' : ''
             }`}
           >
             <WaveField bus={bus} state={orbState} />

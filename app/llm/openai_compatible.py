@@ -26,7 +26,7 @@ class OpenAICompatibleLLM(LLMProvider):
     name = "openai_compatible"
 
     default_model = "gemma-4-31B"
-    default_base_url = "http://10.160.144.101:51029/v1"
+    default_base_url = "http://10.160.144.101:51028/v1"
 
     supports_tools = True
 

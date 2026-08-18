@@ -303,10 +303,22 @@ class Conductor:
             return
 
         if not turn.text:
+            # A name-only batch-STT turn has no request yet.  Leave the gate
+            # open so the next utterance is accepted; a spoken request in the
+            # same transcript takes the one-shot path below instead.
+            self.publish_attention()
+            if turn.wake_activated:
+                return
             self.pending.append(Pending("notice", prompts.NOTICE_ACKNOWLEDGED))
             return
 
         self.speaker.start_reply(turn.text, context=self.memory.summary_for_llm())
+        if turn.wake_activated:
+            # A wake phrase is a one-request activation.  The manual orb stays
+            # open until pressed again, but surrounding speech after this turn
+            # must use the name again rather than becoming accidental input.
+            self.attention.close()
+        self.publish_attention()
 
     def start_research(self, question: str) -> None:
         current = self.pool.foreground_run()
@@ -324,7 +336,7 @@ class Conductor:
         )
         # Fixed text, no LLM round trip: fills the gap before the plan
         # preview (PlanReady, below) has anything to say.
-        self.pending.append(Pending("notice", prompts.NOTICE_RESEARCHING, run.run_id))
+        self.pending.append(Pending("notice", prompts.researching_notice(), run.run_id))
 
     async def stop_everything(self) -> None:
         for run in self.pool.runs.values():

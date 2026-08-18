@@ -27,7 +27,7 @@ these two variables, not a code change.
 
 | name | hosted by | endpoint | tools | notes |
 |---|---|---|---|---|
-| `openai_compatible` | remote / self-hosted, whatever serves the URL | `http://10.160.144.101:51029/v1`, model `gemma-4-31B` | yes | covers llama-server, vLLM and SGLang — anything speaking `/v1/chat/completions` |
+| `openai_compatible` | remote / self-hosted, whatever serves the URL | `http://10.160.144.101:51028/v1`, model `gemma-4-31B` | yes | covers llama-server, vLLM and SGLang — anything speaking `/v1/chat/completions` |
 
 `supports_tools` must be True for this app: the assistant declares
 `research_wiki`, `read_result` and `stop_research`, and a server built without
@@ -54,7 +54,7 @@ You almost certainly do not need a new file — point `LLM_BASE_URL` and
 ## 6. Verifying without LiveKit
 
 ```bash
-curl -s http://10.160.144.101:51029/v1/chat/completions \
+curl -s http://10.160.144.101:51028/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"gemma-4-31B","messages":[{"role":"user","content":"ping"}]}'
 ```

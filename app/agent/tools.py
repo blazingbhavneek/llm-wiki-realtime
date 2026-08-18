@@ -75,7 +75,9 @@ async def read_result(ctx: RunContext[AssistantDeps], handle: str) -> str:
     """Read a Wiki result already retained from an earlier research run.
 
     Only for a follow-up about that same subject. If the question names anything
-    an earlier run did not cover, call research_wiki instead of this. It also
+    an earlier run did not cover, or its returned content lacks the requested
+    detail, call research_wiki immediately. Do not tell the user that an old
+    result is missing information; the new search notice handles that. It also
     answers whether a running investigation is about to cover it.
     """
     return read_retained(ctx.userdata.memory, handle)

@@ -21,6 +21,7 @@ from app.tts.base import TTSProvider, TTSSettings
 REGISTRY: dict[str, str] = {
     "supertonic": "app.tts.supertonic:SupertonicTTS",
     "qwen3": "app.tts.qwen3:Qwen3TTS",
+    "irodori": "app.tts.irodori:IrodoriTTS",
 }
 
 DEFAULT_PROVIDER = "supertonic"

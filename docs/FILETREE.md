@@ -77,8 +77,8 @@ Generated/vendored, never hand-edit, not itemised below: `.venv/`, `frontend/nod
 
 | File | Owns | Must never |
 |---|---|---|
-| `App.jsx` | Room connection/reconnect, orb state machine, mic + voice-gate wiring, text send, data-channel dispatch | — |
-| `lib/audio.js` | `AudioBus` — Web Audio taps for mic/agent RMS levels and the local voice gate | Use `createMediaElementSource` on the agent track (would silence playback) |
+| `App.jsx` | Room connection/reconnect, orb state machine, always-on mic wiring, text send, data-channel dispatch | — |
+| `lib/audio.js` | `AudioBus` — Web Audio taps for mic/agent RMS levels | Use `createMediaElementSource` on the agent track (would silence playback) |
 | `lib/research.js` | `researchReducer` — client mirror of the SSE state machine, the `agent_run_id` guard (§4/§P3), the `DEV_MODE` demo script | Accept a frame from a different `agent_run_id` unless it's `type: 'ask'` |
 | `components/ResearchPanel.jsx` | Renders `research` state | Render markdown/diagrams (bundle-weight rule, stated in the file) |
 | `components/Transcript.jsx` | Conversation bubbles; dedupes streaming interims by `lk.segment_id` | — |
@@ -155,7 +155,7 @@ Generated/vendored, never hand-edit, not itemised below: `.venv/`, `frontend/nod
 |---|---|
 | Assistant talks too much / repeats a fact | `app/core/conductor.py::Conductor.report` (`may_skip`, `_is_no_information_result`) and `app/agent/prompts.py::report_instructions`'s `skip`/`spoken_so_far` blocks |
 | It announces a search twice (「調べます」then a plan preview) | The plan preview is already removed on this branch — `app/core/conductor.py`'s `PlanReady` handler, the commented `self.pending.append(...)` block (see §9 P2a). If this symptom is back, someone uncommented it |
-| One question still produces two spoken preambles (model's own + the fixed notice) | `app/core/conductor.py::start_research` (unconditional `Pending("notice", prompts.NOTICE_RESEARCHING, …)`) vs. the model's own preamble suppressed by `app/agent/prompts.py::ASSISTANT_INSTRUCTIONS`'s last sentence. `pre_branch_plan.md` §P2b–d proposed rotating/dropping the notice; **neither was taken** on this branch — `NOTICE_RESEARCHING` is still one fixed sentence |
+| One question still produces two spoken preambles (model's own + the notice) | `app/core/conductor.py::start_research` (unconditional `Pending("notice", prompts.researching_notice(), …)`) vs. the model's own preamble suppressed by `app/agent/prompts.py::ASSISTANT_INSTRUCTIONS`'s last sentence. The notice is randomly selected from the ten short `NOTICE_RESEARCHING_VARIANTS`. |
 | Greeting fires on every page load | `app/runtime/entrypoint.py` — `conductor.queue_notice(prompts.GREETING)` / `inbox.put_nowait(IdleTick())` are commented out on purpose (§9 P1); `/token` mints a fresh room every load (`app/web/http.py::token`) so an active greeting would fire every time |
 | Research panel shows a stale/previous run | `frontend/src/lib/research.js::researchReducer`'s `agent_run_id` guard; `app/core/conductor.py`'s stamping on every `screen.publish_research` call (`ResearchProgress`, `start_research`, the `ResearchFailed`→retry branch) |
 | Panel freezes mid-run and never recovers | A retry that doesn't republish `ask` — `app/core/conductor.py`'s `ResearchFailed` branch (`can_retry`/`retry`), tested by `tests/test_conductor.py::test_a_retry_republishes_the_ask_frame_with_the_run_id` |
@@ -224,7 +224,7 @@ This deployment's `.env` currently runs `STT_PROVIDER=qwen`, `TTS_PROVIDER=qwen3
 
 **Known cost, stated plainly:** open-ended questions ("which functions do X", "how do A and B differ") get only what the one shallow stage found, with no path to more except the user asking again. That is the trade this mode buys, deliberately.
 
-**Optional steps from `plan.md` §2 not taken on this branch:** A3 (shortening `NOTICE_RESEARCHING` to `"調べます。"`) — the notice is still the original, longer sentence. A2 (dropping the plan preview) **was** taken — see §9.
+**Optional steps from `plan.md` §2:** A3 is applied in a user-facing variant: each research start randomly selects one of ten short `NOTICE_RESEARCHING_VARIANTS`. A2 (dropping the plan preview) **was** taken — see §9.
 
 **To revert to full research (`plan.md` §2 A1):** in `app/rag/llm_wiki.py`, comment out `"max_levels": 1,` and uncomment `"max_levels": 3,`. That undoes the whole cascade above by itself; A2/A3 are independent and can stay either way.
 

@@ -43,6 +43,15 @@ class ConductorTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(speaker.ducked)
         self.assertIs(screen.ducked, False)  # ducked then unducked
 
+    async def test_wake_word_starts_one_request_then_returns_dormant(self):
+        conductor = build()
+
+        await feed(conductor, UserSaidText("AIみなと、巡回編成を調べて"))
+
+        self.assertEqual(conductor.speaker.started[-1][0], "reply")
+        self.assertIn("巡回編成を調べて", conductor.speaker.started[-1][1])
+        self.assertEqual(conductor.attention.state, DORMANT)
+
     async def test_speech_during_a_report_is_a_real_barge_in(self):
         conductor = build()
         speaker = conductor.speaker

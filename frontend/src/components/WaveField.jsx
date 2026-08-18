@@ -73,22 +73,42 @@ const FRAGMENT_SHADER = [
   '  float r = length(uv);',
   '  float theta = atan(uv.y, uv.x);',
   '',
-  '  // The big audio-reactive grow lives outside the shader now (CSS transform',
-  '  // on the canvas, up to 1.5x). This stays a small internal nudge so the',
-  '  // rim keeps some texture without ever pushing the circle past the edge',
-  '  // of its own backing buffer.',
+  '  // The core stays compact. Audio is expressed as short, discrete radial',
+  '  // bars around it, like a circular spectrum rather than a swelling blob.',
   '  float spectrum = (u_b0 + u_b1 + u_b2 + u_b3 + u_b4 + u_b5) / 6.0;',
-  '  float R = 0.425 + 0.003 * sin(t * 0.62)',
-  '                  + 0.014 * e + 0.002 * spectrum;',
+  '  // The canvas has 20% overscan for the rim, so this still renders as the',
+  '  // same-sized resting orb while leaving room for its outer wave.',
+  '  float coreRadius = 0.235 + 0.002 * sin(t * 0.62);',
   '',
-  '  // A few low-order angular harmonics, keyed to bass/mid/treble bands, bend',
-  '  // the rim into a soft liquid wobble. Smooth cosines only (no noise), so it',
-  '  // reads as a droplet rather than a spiky blob; amplitude rides on e, so the',
-  '  // disc is still genuinely round at rest and only deforms while audio plays.',
-  '  float wobble = 0.50 * u_b0 * cos(theta * 2.0 + t * 1.1)',
-  '               + 0.33 * u_b2 * cos(theta * 3.0 - t * 1.6 + 2.1)',
-  '               + 0.20 * u_b5 * cos(theta * 5.0 + t * 2.3 + 4.2);',
-  '  R += 0.016 * e * wobble;',
+  '  // Broad sine waves keep the rim rounded and continuous instead of sharp',
+  '  // sawtooth-like spikes or angle-quantised blocks.',
+  '  // Only the frequency map travels around the rim. The interior field uses',
+  '  // uv directly above, so this implies rotation without rotating the orb.',
+  '  float bandAngle = theta + t * 0.85;',
+  '  float bandShape = 0.05',
+  '                  + 0.24 * u_b0 * (0.5 + 0.5 * sin(bandAngle * 2.0))',
+  '                  + 0.21 * u_b1 * (0.5 + 0.5 * sin(bandAngle * 3.0 + 1.1))',
+  '                  + 0.18 * u_b2 * (0.5 + 0.5 * sin(bandAngle * 5.0 + 2.4))',
+  '                  + 0.15 * u_b3 * (0.5 + 0.5 * sin(bandAngle * 7.0 + 0.7))',
+  '                  + 0.12 * u_b4 * (0.5 + 0.5 * sin(bandAngle * 11.0 + 3.2))',
+  '                  + 0.10 * u_b5 * (0.5 + 0.5 * sin(bandAngle * 13.0 + 4.5));',
+  '  // Fewer crests make the outline read as a spectrum ring, not an amoeba.',
+  '  float fineRipple = 0.5 + 0.5 * sin(theta * 11.0',
+  '                                   + 0.58 * sin(theta * 3.0 - t * 0.70)',
+  '                                   + 0.24 * sin(theta * 6.0 + t * 0.43));',
+  '  // An irregular, travelling low-frequency envelope groups neighbouring',
+  '  // crests into occasional pairs instead of making every peak equally tall.',
+  '  float pairField = 0.5 + 0.5 * sin(bandAngle * 3.0',
+  '                                  + 0.88 * sin(bandAngle * 2.0 + 1.9)',
+  '                                  + 0.31 * sin(bandAngle * 5.0 + 4.1));',
+  '  float pairEnvelope = 0.34 + 0.66 * smoothstep(0.36, 0.70, pairField);',
+  '  // Curve both envelopes: strong bands get taller rounded crests while',
+  '  // weak bands fall away more decisively instead of looking normalised.',
+  '  float rimContrast = min(1.0, 1.35 * pow(bandShape, 1.35));',
+  '  float tooth = min(1.0, (0.06 + 0.94 * pow(fineRipple, 1.45))',
+  '                       * rimContrast * pairEnvelope);',
+  '  // At full level the outermost wave reaches 2x the quiet core radius.',
+  '  float R = coreRadius + coreRadius * e * tooth;',
   '',
   '  // Domain-warped light inside the orb continues moving at total silence.',
   '  vec2 flow = uv * (3.0 + 0.9 * e);',
@@ -110,7 +130,7 @@ const FRAGMENT_SHADER = [
   '  float px = 1.0 / min(u_resolution.x, u_resolution.y);',
   '  float feather = max(0.0045, 2.0 * px) + 0.005 * e;',
   '  float mask = 1.0 - smoothstep(R - feather, R + feather, r);',
-  '  float innerEdge = smoothstep(R - 0.055, R, r);',
+  '  float innerEdge = smoothstep(R - 0.040, R, r);',
   '  vec3 edge = mix(vec3(0.68, 0.83, 1.0), WHITE, u_listen);',
   '  col = mix(col, edge, innerEdge * (0.22 + 0.10 * u_listen));',
   '  gl_FragColor = vec4(col, mask);',
@@ -232,13 +252,13 @@ export default function WaveField({ bus, state }) {
       for (let i = 0; i < 3; i++) accent[i] = ease(accent[i], target[i], 0.035)
 
       const liveLevel = audio ? Math.max(audio.userLevel, audio.agentLevel) : 0
-      // Give ordinary speech enough travel to visibly reshape the rim without
-      // making keyboard noise or room tone pulse the disc.
-      smooth.level = envelope(smooth.level, Math.min(1, liveLevel * 1.18))
-      // The macro "it's speaking" cue: the whole disc grows up to 1.5x its
+      // Keep ordinary speech controlled; the 1.5x maximum is reserved for a
+      // genuinely loud signal instead of being reached by normal speech.
+      smooth.level = envelope(smooth.level, Math.min(1, liveLevel))
+      // The macro "it's speaking" cue: the whole disc grows up to 2.2x its
       // resting radius, so it reads from across a room -- not just the shader's
       // own fine-grained rim reactivity below.
-      canvas.style.transform = `scale(${(1 + 0.5 * smooth.level).toFixed(3)})`
+      canvas.style.transform = `scale(${(1 + 1.0 * smooth.level).toFixed(3)})`
       smooth.think = ease(smooth.think, active.thinking ? 1 : 0, 0.025)
       smooth.listen = ease(smooth.listen, active.mode === 'listening' ? 1 : 0, 0.045)
       for (let i = 0; i < BAND_SLICES.length; i++) {
@@ -272,7 +292,7 @@ export default function WaveField({ bus, state }) {
   return (
     <canvas
       ref={canvasRef}
-      className="block h-full w-full drop-shadow-[0_10px_18px_rgba(37,99,235,0.16)]"
+      className="block h-[120%] w-[120%] -m-[10%] drop-shadow-[0_10px_18px_rgba(37,99,235,0.16)]"
       aria-hidden="true"
     />
   )
